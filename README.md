@@ -68,6 +68,23 @@ Response fields: `address`, `exists`, `xlmBalance`, `minimumBalance`, `available
 `{contractId, kind, trustline, balance, authorized}`, `canFund`, `problems`. Problem codes are
 `account_not_found`, `missing_trustline`, `not_authorized`, `insufficient_balance`, `insufficient_xlm_for_fees`.
 
+Configuration (all optional, see `.env.example`): `PORT`, `LOG_LEVEL` (debug|info|warn|error|silent, default info; silent in tests),
+`ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`, `STELLAR_RPC_URL`, `FRONTEND_URL`.
+
+Every request is assigned a correlation id. Send `X-Request-Id` (must match `^[A-Za-z0-9._-]{8,128}$`) and it is echoed back in the
+`X-Request-Id` response header and included in every error JSON body. Access logs are emitted as structured JSON (one line per request) and
+unexpected 500s are logged with a stack trace (never leaked to the client). Authorization, `x-api-key` and `Cookie` header values are redacted
+and request bodies are never logged.
+
+Standalone server timeouts (env, all optional): `KEEP_ALIVE_TIMEOUT_MS` (default 65000),
+`HEADERS_TIMEOUT_MS` (default 66000, must be > keep-alive), `REQUEST_TIMEOUT_MS` (default 30000).
+`SHUTDOWN_GRACE_MS` (default 10000) controls how long to wait for in-flight requests on shutdown.
+`PORT` is validated: non-integer or out-of-range (1–65535) values cause a fast fail with a clear message.
+
+On SIGTERM/SIGINT the server stops accepting connections, sets `Connection: close` on responses,
+returns `503 { status: 'draining' }` from `/health` while draining, waits for in-flight requests up to
+the grace deadline, then force-closes remaining sockets and exits.
+
 ## Deployment
 
 Deployed on Vercel as a serverless function: `api/index.ts` exports the Express app and
