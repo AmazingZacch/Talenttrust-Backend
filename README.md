@@ -27,14 +27,16 @@ data is per-instance and resets on redeploy.
 | GET | `/api/v1/chain` | On-chain contract deployment info |
 | GET | `/api/v1/stats` | Aggregate statistics |
 | GET | `/api/v1/accounts/:address/readiness` | Check whether an account can fund an escrow (`token`, `amount` in base units) |
-| GET/POST | `/api/v1/contracts` | List (`?status=`, `?party=`) / create escrow contracts |
+| GET/POST | `/api/v1/contracts` | List (`?status=`, `?party=`, `?linked=true\|false`) / create escrow contracts |
 | GET | `/api/v1/contracts/:id` | Get a contract |
 | POST | `/api/v1/contracts/:id/deposit` | { "amount": 100 } |
 | POST | `/api/v1/contracts/:id/milestones/:index/release` | Release a milestone |
 | POST | `/api/v1/contracts/:id/dispute` | { "raisedBy": "G...", "reason": "..." } |
 | POST | `/api/v1/contracts/:id/resolve` | { "freelancerBps": 5000 } |
 | POST | `/api/v1/contracts/:id/cancel` | Cancel and refund |
-| POST | `/api/v1/contracts/:id/reputation` | { "rating": 5 } |
+| POST | `/api/v1/contracts/:id/reputation` | `{ "rating": 5 }` |
+| POST | `/api/v1/contracts/:id/link` | Link to on-chain escrow `{ "escrowId": "3" }` |
+| GET | `/api/v1/contracts/:id/parity` | Parity check report against on-chain state |
 | GET | `/api/v1/reputation/:address` | Freelancer reputation |
 
 ## Development
