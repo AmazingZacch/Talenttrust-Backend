@@ -1,3 +1,13 @@
+const DEFAULT_BODY_LIMIT = '100kb';
+
+function resolveBodyLimit(raw: string | undefined): string {
+  const value = (raw ?? '').trim() || DEFAULT_BODY_LIMIT;
+  // A bare integer means bytes; decimals need a unit. This matches how the `bytes` package parses limits.
+  if (!/^(\d+|\d+(\.\d+)?\s*(b|kb|mb|gb|tb|pb))$/i.test(value)) {
+    throw new Error(`Invalid BODY_LIMIT "${value}". Use a size such as 100kb or 1mb.`);
+  }
+  return value;
+}
 const slaRaw = Number(process.env.DISPUTE_SLA_HOURS);
 
 export const config = {
@@ -15,6 +25,7 @@ export const config = {
   pauseFailMode: (process.env.PAUSE_FAIL_MODE === 'closed' ? 'closed' : 'open') as 'open' | 'closed',
   /** Set PAUSE_CHECK_CHAIN=false to skip the on-chain is_paused probe (tests, offline dev). */
   pauseCheckChain: process.env.PAUSE_CHECK_CHAIN !== 'false',
+  bodyLimit: resolveBodyLimit(process.env.BODY_LIMIT),
 };
 
 export const explorerUrl = (id: string = config.contractId) =>

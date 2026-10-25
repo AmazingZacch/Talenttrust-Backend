@@ -172,6 +172,7 @@ Configuration (all optional, see `.env.example`): `PORT`, `LOG_LEVEL` (debug|inf
 `METRICS_TOKEN` (protects `GET /metrics`; when unset the endpoint is disabled),
 `CURSOR_SECRET` (signs contract-list cursors; random per-process default), `REQUIRE_IF_MATCH` (`true` makes `If-Match` mandatory on contract mutations),
 `ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`, `STELLAR_RPC_URL`, `STELLAR_NETWORK_PASSPHRASE`, `TX_TIMEOUT_SECONDS`, `FRONTEND_URL`, `IDEMPOTENCY_REQUIRED`, `AUTH_SECRET`, `AUTH_REQUIRED`,
+`BODY_LIMIT` (maximum request body size, default `100kb`),
 `RECEIPT_SIGNING_SECRET` (Stellar `S...` ed25519 seed), and `CRON_SECRET` (required to authenticate
 `GET`/`POST /api/cron/expire-contracts`). New contracts default to a funding deadline 14 days after
 creation; explicit deadlines must be between one hour and 90 days in the future. Contracts still unfunded
@@ -200,6 +201,18 @@ Standalone server timeouts (env, all optional): `KEEP_ALIVE_TIMEOUT_MS` (default
 On SIGTERM/SIGINT the server stops accepting connections, sets `Connection: close` on responses,
 returns `503 { status: 'draining' }` from `/health` while draining, waits for in-flight requests up to
 the grace deadline, then force-closes remaining sockets and exits.
+
+## Request bodies
+
+Routes that take a body (`POST /api/v1/contracts` and `/deposit`, `/dispute`, `/resolve`, `/reputation`, `/link`) require `Content-Type: application/json`. Body-less POSTs (`/release`, `/cancel`) need no content type. Body failures return a stable error code (and the request's `requestId`):
+
+| Situation | Status | Error code |
+| --- | --- | --- |
+| Body larger than `BODY_LIMIT` | 413 | `payload_too_large` |
+| Non-JSON content type, unsupported charset or content encoding | 415 | `unsupported_media_type` |
+| JSON body whose top level is not an object | 400 | `invalid_body` |
+| Malformed JSON | 400 | `invalid_json` |
+| Request aborted before the body was received | 400 | `request_aborted` |
 
 ## Deployment
 

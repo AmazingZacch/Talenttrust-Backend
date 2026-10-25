@@ -1557,7 +1557,29 @@ function withPauseGuard<T extends { paths: object }>(doc: T): T {
   return doc;
 }
 
-export const openapi = withProblems(withPauseGuard(withEtags(withBearerAuth(withIdempotency(withReceipts(spec))))));
+/** 413/415 (and invalid_body) on the routes that take a JSON body. */
+function withBodyErrors<T extends { paths: object }>(doc: T): T {
+  const paths = doc.paths as Record<string, { post?: Operation }>;
+  for (const path of [
+    '/api/v1/contracts',
+    '/api/v1/contracts/{id}/deposit',
+    '/api/v1/contracts/{id}/dispute',
+    '/api/v1/contracts/{id}/resolve',
+    '/api/v1/contracts/{id}/reputation',
+    '/api/v1/contracts/{id}/link',
+  ]) {
+    const op = paths[path]?.post;
+    if (!op) continue;
+    op.responses = {
+      ...op.responses,
+      413: errorResponse('Request body exceeds BODY_LIMIT (payload_too_large)'),
+      415: errorResponse('Content-Type is not application/json, or the charset or content encoding is unsupported (unsupported_media_type)'),
+    };
+  }
+  return doc;
+}
+
+export const openapi = withProblems(withBodyErrors(withPauseGuard(withEtags(withBearerAuth(withIdempotency(withReceipts(spec)))))));
 
 export const docsHtml = `<!doctype html>
 <html lang="en">

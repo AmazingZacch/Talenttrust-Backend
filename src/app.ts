@@ -75,6 +75,30 @@ const wrap = (fn: Handler) => async (req: Request, res: Response, next: NextFunc
   }
 };
 
+const hasBody = (req: Request) => {
+  const length = Number(req.headers['content-length']);
+  return req.headers['transfer-encoding'] !== undefined || (Number.isFinite(length) && length > 0);
+};
+
+// Routes that take a body must receive application/json. Body-less POSTs (release, cancel) are left alone.
+const requireJson = (req: Request, _res: Response, next: NextFunction) => {
+  if (hasBody(req) && !req.is('application/json')) {
+    return next(new HttpError(415, 'unsupported_media_type', 'Content-Type must be application/json'));
+  }
+  next();
+};
+
+const requireObjectBody = (req: Request, _res: Response, next: NextFunction) => {
+  const body: unknown = req.body;
+  if (hasBody(req) && (typeof body !== 'object' || body === null || Array.isArray(body))) {
+    return next(new HttpError(400, 'invalid_body', 'Request body must be a JSON object'));
+  }
+  next();
+};
+
+/** Content-Type + JSON-object checks for the body-taking routes (run before auth/validation). */
+const jsonObjectBody = [requireJson, requireObjectBody];
+
 const id = (req: Request) => {
   const n = Number(req.params.id);
   if (!Number.isInteger(n) || n < 1) throw new HttpError('invalid_id');
@@ -453,7 +477,15 @@ export function createApp(
     }),
   );
 
-  app.use(express.json({ limit: '100kb' }));
+  // Strict parsing (the default) rejects top-level primitives such as 42 or "x" with invalid_json.
+  // The body-taking routes parse leniently instead, so requireObjectBody can reply invalid_body.
+  // Keep this pattern in sync with the routes that use jsonObjectBody below.
+  const objectBodyRoutes = /^\/api\/v1\/contracts(\/[^/]+\/(deposit|dispute|resolve|reputation|link))?\/?$/i;
+  const jsonStrict = express.json({ limit: config.bodyLimit });
+  const jsonLenient = express.json({ limit: config.bodyLimit, strict: false });
+  app.use((req, res, next) =>
+    (req.method === 'POST' && objectBodyRoutes.test(req.path) ? jsonLenient : jsonStrict)(req, res, next),
+  );
 
   // Structured access log on response finish.
   app.use((req, res, next) => {
@@ -699,6 +731,7 @@ export function createApp(
   );
   v1.post(
     '/contracts',
+    ...jsonObjectBody,
     requireNotPaused,
     requireAuth,
     (req, _res, next) => {
@@ -805,6 +838,7 @@ export function createApp(
   );
   v1.post(
     '/contracts/:id/deposit',
+    ...jsonObjectBody,
     requireNotPaused,
     requireAuth,
     validate({ params: IdParam, body: DepositBody }),
@@ -831,6 +865,7 @@ export function createApp(
   );
   v1.post(
     '/contracts/:id/dispute',
+    ...jsonObjectBody,
     requireNotPaused,
     requireAuth,
     validate({ params: IdParam, body: DisputeBody }),
@@ -846,6 +881,7 @@ export function createApp(
   );
   v1.post(
     '/contracts/:id/resolve',
+    ...jsonObjectBody,
     validate({ params: IdParam, body: ResolveBody }),
     checkPreconditions,
     wrap((req, res) => {
@@ -870,6 +906,7 @@ export function createApp(
   );
   v1.post(
     '/contracts/:id/reputation',
+    ...jsonObjectBody,
     requireAuth,
     validate({ params: IdParam, body: RateBody }),
     checkPreconditions,
@@ -901,6 +938,7 @@ export function createApp(
   );
   v1.post(
     '/contracts/:id/link',
+    ...jsonObjectBody,
     wrap(async (req) => publicContract(await store.linkEscrow(id(req), req.body?.escrowId, chainReader))),
   );
   v1.get(
@@ -1065,8 +1103,31 @@ export function createApp(
         });
       return;
     }
-    if (err && typeof err === 'object' && (err as { type?: string }).type === 'entity.parse.failed') {
-      sendProblem(new HttpError('invalid_json'));
+    // body-parser failures: stable 4xx codes instead of a 500 that invites retries.
+    const parserError = (err && typeof err === 'object' ? err : {}) as { type?: string; status?: unknown; statusCode?: unknown };
+    switch (parserError.type) {
+      case 'entity.parse.failed':
+        sendProblem(new HttpError('invalid_json'));
+        return;
+      case 'entity.too.large':
+        sendProblem(new HttpError('payload_too_large', `Request body exceeds the ${config.bodyLimit} limit`));
+        return;
+      case 'charset.unsupported':
+      case 'encoding.unsupported':
+        sendProblem(new HttpError('unsupported_media_type', 'Unsupported charset or content encoding'));
+        return;
+      case 'request.aborted':
+        sendProblem(new HttpError('request_aborted'));
+        return;
+      case 'request.size.invalid':
+        sendProblem(new HttpError('invalid_body', 'Request body size does not match its Content-Length'));
+        return;
+    }
+    const status = [parserError.status, parserError.statusCode].find(
+      (value): value is number => typeof value === 'number' && value >= 400 && value <= 499,
+    );
+    if (status !== undefined) {
+      sendProblem(new HttpError(status, 'bad_request', 'Bad request'));
       return;
     }
     logger.error('unhandled_error', {
