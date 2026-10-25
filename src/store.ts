@@ -168,6 +168,29 @@ export interface ContractRevision {
   changes: Array<{ field: 'title' | 'milestones'; from: unknown; to: unknown }>;
 }
 
+/** One row of a party's activity statement (CSV/JSON export). */
+export interface StatementRow {
+  contract_id: string;
+  title: string;
+  role: 'client' | 'freelancer';
+  counterparty: string;
+  token: string;
+  status: ContractStatus;
+  /** @deprecated lossy above 2^53; use total_amount_units */
+  total_amount: number;
+  funded_amount: number;
+  released_amount: number;
+  outstanding_amount: number;
+  /** Exact base-unit amounts as decimal strings. */
+  total_amount_units: string;
+  funded_amount_units: string;
+  released_amount_units: string;
+  outstanding_amount_units: string;
+  dispute_freelancer_bps: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export type RatingHistogram = [number, number, number, number, number];
 
 export type ReputationSort = 'score' | 'completed' | 'average';
@@ -1595,6 +1618,49 @@ export class EscrowStore {
     const t = this.getInternalTemplate(id);
     if (t.owner !== owner) throw new HttpError(403, 'forbidden', 'Only the owner can delete this template');
     this.templates.delete(id);
+  }
+
+  /**
+   * Statement rows for `address` (as client and/or freelancer) for contracts created in
+   * [from, to). Dispute reasons are never included.
+   */
+  getStatement(address: string, from: Date, to: Date, role: 'client' | 'freelancer' | 'all'): StatementRow[] {
+    return [...this.contracts.values()]
+      .map((c) => this.expireIfDue(c))
+      .filter((c) => {
+        const isClient = c.client === address;
+        const isFreelancer = c.freelancer === address;
+        if (!isClient && !isFreelancer) return false;
+        if (role === 'client' && !isClient) return false;
+        if (role === 'freelancer' && !isFreelancer) return false;
+        const created = Date.parse(c.createdAt);
+        return created >= from.getTime() && created < to.getTime();
+      })
+      .map((c): StatementRow => {
+        // Funds are only still held while the contract is live; resolution/cancellation/expiry pays out the rest.
+        const holding = c.status === 'Created' || c.status === 'Funded' || c.status === 'Disputed';
+        const outstanding = holding ? c.fundedAmount - c.releasedAmount : 0n;
+        const asClient = c.client === address;
+        return {
+          contract_id: String(c.id),
+          title: c.title,
+          role: asClient ? 'client' : 'freelancer',
+          counterparty: asClient ? c.freelancer : c.client,
+          token: c.token,
+          status: c.status,
+          total_amount: Number(c.totalAmount),
+          funded_amount: Number(c.fundedAmount),
+          released_amount: Number(c.releasedAmount),
+          outstanding_amount: Number(outstanding),
+          total_amount_units: c.totalAmount.toString(),
+          funded_amount_units: c.fundedAmount.toString(),
+          released_amount_units: c.releasedAmount.toString(),
+          outstanding_amount_units: outstanding.toString(),
+          dispute_freelancer_bps: c.dispute?.freelancerBps ?? null,
+          created_at: c.createdAt,
+          updated_at: c.updatedAt,
+        };
+      });
   }
 
   stats() {

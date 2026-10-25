@@ -19,6 +19,7 @@ import {
 import { openapi, docsHtml, docsCsp } from './openapi';
 import { allowlist, corsOptionsFor, originGuard } from './cors';
 import { methodNotAllowed, optionsHandler } from './methods';
+import { CSV_HEADERS, csvRow } from './csv';
 import { parseApiKeysConfig, type ParsedApiKeys } from './auth/apiKeysConfig';
 import { authenticateScopedApiKey, requireScope, type ScopedApiKeyRequest } from './auth/scopedApiKeyMiddleware';
 import { SCOPES } from './auth/scopes';
@@ -716,6 +717,8 @@ export function createApp(
         'GET  /api/v1/chain',
         'GET  /api/v1/chain/contracts/:chainId',
         'GET  /api/v1/chain/reputation/:address',
+        'GET  /api/v1/parties/:address/statement.csv',
+        'GET  /api/v1/parties/:address/statement.json',
         'GET  /api/v1/stats',
         'POST /api/v1/tx/build',
         'GET  /api/v1/contracts',
@@ -968,6 +971,70 @@ export function createApp(
     wrap((req) => {
       const key = (req as ScopedApiKeyRequest).scopedApiKey!;
       return { keyId: key.id, scopes: key.scopes };
+    }),
+  );
+  // --- Per-address activity statements ---
+  const parseStatementParams = (req: Request) => {
+    const address = req.params.address;
+    const MAX_RANGE_MS = 3 * 365.25 * 24 * 60 * 60 * 1000; // ~3 years
+    const DEFAULT_RANGE_MS = 365 * 24 * 60 * 60 * 1000; // 365 days
+    const toDate = req.query.to ? new Date(String(req.query.to)) : new Date(Date.now());
+    const fromDate = req.query.from ? new Date(String(req.query.from)) : new Date(toDate.getTime() - DEFAULT_RANGE_MS);
+    if (isNaN(fromDate.getTime()) || isNaN(toDate.getTime())) {
+      throw new HttpError(400, 'invalid_range', 'from and to must be valid ISO dates');
+    }
+    if (fromDate >= toDate) throw new HttpError(400, 'invalid_range', 'from must be before to');
+    if (toDate.getTime() - fromDate.getTime() > MAX_RANGE_MS) {
+      throw new HttpError(400, 'invalid_range', 'date range must not exceed 3 years');
+    }
+    const roleRaw = typeof req.query.role === 'string' ? req.query.role : 'all';
+    if (roleRaw !== 'client' && roleRaw !== 'freelancer' && roleRaw !== 'all') {
+      throw new HttpError(400, 'invalid_role', 'role must be client, freelancer, or all');
+    }
+    return { address, from: fromDate, to: toDate, role: roleRaw as 'client' | 'freelancer' | 'all', bom: req.query.bom === 'true' };
+  };
+  v1.get('/parties/:address/statement.csv', (req, res, next) => {
+    try {
+      const { address, from, to, role, bom } = parseStatementParams(req);
+      const rows = store.getStatement(address, from, to, role);
+      const safeAddress = address.replace(/[^A-Za-z0-9_-]/g, '_');
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="talenttrust-${safeAddress}-${from.toISOString().slice(0, 10)}-${to.toISOString().slice(0, 10)}.csv"`,
+      );
+      if (bom) res.write('\uFEFF'); // UTF-8 BOM for Excel when ?bom=true
+      res.write(csvRow([...CSV_HEADERS]));
+      for (const row of rows) {
+        // Amount columns carry the exact base-unit decimal strings.
+        res.write(
+          csvRow([
+            row.contract_id,
+            row.title,
+            row.role,
+            row.counterparty,
+            row.token,
+            row.status,
+            row.total_amount_units,
+            row.funded_amount_units,
+            row.released_amount_units,
+            row.outstanding_amount_units,
+            row.dispute_freelancer_bps,
+            row.created_at,
+            row.updated_at,
+          ]),
+        );
+      }
+      res.end();
+    } catch (err) {
+      next(err);
+    }
+  });
+  v1.get(
+    '/parties/:address/statement.json',
+    wrap((req) => {
+      const { address, from, to, role } = parseStatementParams(req);
+      return { address, from: from.toISOString(), to: to.toISOString(), role, data: store.getStatement(address, from, to, role) };
     }),
   );
   v1.get('/stats', wrap(() => store.stats()));
