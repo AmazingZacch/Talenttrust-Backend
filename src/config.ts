@@ -10,13 +10,27 @@ function resolveBodyLimit(raw: string | undefined): string {
 }
 const slaRaw = Number(process.env.DISPUTE_SLA_HOURS);
 
+const network = process.env.STELLAR_NETWORK || 'testnet';
+
+/** Stellar network passphrases by STELLAR_NETWORK name. */
+const NETWORK_PASSPHRASES: Record<string, string> = {
+  testnet: 'Test SDF Network ; September 2015',
+  mainnet: 'Public Global Stellar Network ; September 2015',
+  public: 'Public Global Stellar Network ; September 2015',
+  futurenet: 'Test SDF Future Network ; October 2022',
+};
+
 const intEnv = (value: string | undefined, fallback: number) => {
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
 };
 
 export const config = {
-  network: process.env.STELLAR_NETWORK || 'testnet',
+  network,
+  networkPassphrase:
+    process.env.STELLAR_NETWORK_PASSPHRASE ||
+    NETWORK_PASSPHRASES[network.toLowerCase()] ||
+    NETWORK_PASSPHRASES.testnet,
   contractId:
     process.env.ESCROW_CONTRACT_ID || 'CCZMIVUBMG5SBC47SDTC32RWLBJ2HW2DCFVWJEOKCH2IFJBZGBKTXK5W',
   rpcUrl: process.env.STELLAR_RPC_URL || 'https://soroban-testnet.stellar.org',
@@ -37,6 +51,8 @@ export const config = {
   /** Set PAUSE_CHECK_CHAIN=false to skip the on-chain is_paused probe (tests, offline dev). */
   pauseCheckChain: process.env.PAUSE_CHECK_CHAIN !== 'false',
   bodyLimit: resolveBodyLimit(process.env.BODY_LIMIT),
+  /** Max relayed transactions remembered for GET /api/v1/tx. */
+  txCacheMax: intEnv(process.env.TX_CACHE_MAX, 200),
 };
 
 export const explorerUrl = (id: string = config.contractId) =>
