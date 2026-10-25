@@ -13,6 +13,7 @@
 import { parseAmount, checkedAdd, I128_MAX } from './amount';
 import { HttpError } from './amount-error';
 import { AuditStore, type AuditAction, type AuditContext, type AuditState } from './audit';
+import { StoreEventEmitter } from './events';
 
 export { HttpError } from './amount-error';
 
@@ -474,6 +475,8 @@ export class EscrowStore {
   private leaderboardCache: LeaderboardCache | null = null;
   private priorWeightOverride?: number;
   private readonly clock: Clock;
+  /** Domain events (webhooks), emitted only after a mutation succeeds. */
+  readonly events: StoreEventEmitter;
   private reviews: Review[] = [];
   private nextReviewId = 1;
   private nextId = 1;
@@ -485,13 +488,20 @@ export class EscrowStore {
   public audit: AuditStore = new AuditStore();
   private auditContext: AuditContext | undefined;
 
-  /** `new EscrowStore(clock)` or `new EscrowStore({ clock?, priorWeight? })`. */
-  constructor(clockOrOptions: Clock | { clock?: Clock; priorWeight?: number } = () => new Date()) {
+  /** `new EscrowStore(clock)`, `new EscrowStore(events)` or `new EscrowStore({ clock?, priorWeight?, events? })`. */
+  constructor(
+    clockOrOptions: Clock | StoreEventEmitter | { clock?: Clock; priorWeight?: number; events?: StoreEventEmitter } = () => new Date(),
+  ) {
     if (typeof clockOrOptions === 'function') {
       this.clock = clockOrOptions;
+      this.events = new StoreEventEmitter();
+    } else if (clockOrOptions instanceof StoreEventEmitter) {
+      this.clock = () => new Date();
+      this.events = clockOrOptions;
     } else {
       this.clock = clockOrOptions.clock ?? (() => new Date());
       this.priorWeightOverride = clockOrOptions.priorWeight;
+      this.events = clockOrOptions.events ?? new StoreEventEmitter();
     }
     // Count every domain mutation as ok / <error code> for the metrics endpoint, and
     // append an audit entry (before/after state) for every one that succeeds.
@@ -509,9 +519,41 @@ export class EscrowStore {
           throw err;
         }
         this.mutationRecorder(action, 'ok');
-        this.recordAudit(action as AuditAction, contractId ?? (result as { id: number }).id, before, args);
+        const affectedId = contractId ?? (result as { id: number }).id;
+        this.recordAudit(action as AuditAction, affectedId, before, args);
+        this.emitEvent(action, affectedId, args, result);
         return result;
       };
+    }
+  }
+
+  /** Publish the webhook event for a successful mutation (dispute reasons stay confidential). */
+  private emitEvent(action: string, contractId: number, args: unknown[], result: unknown) {
+    const internal = this.contracts.get(contractId);
+    if (!internal) return;
+    const contract = publicContract(toPublic(internal));
+    switch (action) {
+      case 'create':
+        this.events.emit('contract.created', { contract });
+        break;
+      case 'deposit':
+        this.events.emit(contract.status === 'Funded' ? 'contract.funded' : 'contract.updated', { contract });
+        break;
+      case 'release':
+        this.events.emit('milestone.released', { contract, milestone: contract.milestones[Number(args[1])] });
+        break;
+      case 'dispute':
+        this.events.emit('dispute.raised', { contract, dispute: contract.dispute });
+        break;
+      case 'resolve':
+        this.events.emit('dispute.resolved', { contract, dispute: contract.dispute });
+        break;
+      case 'cancel':
+        this.events.emit('contract.cancelled', { contract });
+        break;
+      case 'rate':
+        this.events.emit('reputation.issued', { contract, reputation: result as Record<string, unknown> });
+        break;
     }
   }
 

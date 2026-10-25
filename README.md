@@ -62,6 +62,10 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | POST | `/api/v1/tx/submit` | Validate and relay a signed escrow transaction (`{ "xdr": "..." }`) |
 | GET | `/api/v1/tx` | List recent relayed transactions (`?limit=`) |
 | GET | `/api/v1/tx/:hash` | Transaction status, decoded `returnValue` and `contractError` (`?wait=true` long-polls up to 20s) |
+| POST/GET | `/api/v1/webhook-subscriptions` | Create or list signed webhook subscriptions |
+| GET/PATCH/DELETE | `/api/v1/webhook-subscriptions/:id` | Manage a subscription without exposing its secret |
+| POST | `/api/v1/webhook-subscriptions/:id/rotate-secret` | Rotate a subscription secret |
+| GET | `/api/v1/webhook-subscriptions/:id/deliveries` | Bounded delivery history |
 | POST/GET | `/api/v1/templates` | Create a milestone template (`fixed` amounts or `percent` bps summing to 10000) / list by `?owner=` |
 | GET/PUT/DELETE | `/api/v1/templates/:id` | Get / update (owner only, bumps `version`) / delete (owner only) a template |
 | GET | `/api/v1/contracts/:id/history` | Hash-chained audit history of a contract (`?limit=`, `?cursor=`) |
@@ -69,6 +73,21 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | GET | `/metrics` | Prometheus exposition-format metrics (requires `Authorization: Bearer <METRICS_TOKEN>`; disabled when `METRICS_TOKEN` unset) |
 
 *Note: All contract mutation endpoints accept `?receipt=true` to attach a signed `Receipt` JWS header.*
+
+## Webhooks
+
+Webhook management is disabled (404) when `WEBHOOK_ADMIN_TOKEN` is unset. When configured, management
+requests use `Authorization: Bearer <token>`. Create a subscription with `{ "url":
+"https://example.com/events", "events": ["milestone.released"] }`; the generated `whsec_`
+secret is returned only in that creation response and again when explicitly rotated. Events:
+`contract.created`, `contract.updated`, `contract.funded`, `milestone.released`, `dispute.raised`,
+`dispute.resolved`, `contract.cancelled`, `reputation.issued` (dispute reasons are never included). Delivery
+payloads are signed as `sha256=HMAC_SHA256(secret, timestamp + "." + rawBody)` and include
+`X-Timestamp`, `X-Event-Type`, and `X-Event-ID`. Delivery is asynchronous, retries transient
+failures up to six attempts with exponential backoff and jitter, and retains bounded delivery
+history. Public hosting rejects private, loopback, link-local, and reserved DNS destinations;
+`http://localhost` is allowed only outside production. DNS can still change after validation,
+so production deployments should use egress controls as defense in depth.
 
 ## Milestone templates
 

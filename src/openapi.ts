@@ -162,6 +162,7 @@ const spec = {
     { name: 'Receipts' },
     { name: 'Cron' },
     { name: 'Transactions', description: 'Relay of wallet-signed escrow transactions to Soroban RPC' },
+    { name: 'Webhooks', description: 'Signed, retried event deliveries (WEBHOOK_ADMIN_TOKEN)' },
     { name: 'Templates', description: 'Reusable milestone plans for creating contracts' },
     { name: 'Audit', description: 'Tamper-evident, hash-chained log of escrow state transitions' },
     { name: 'Disputes', description: 'Admin dispute queue. Requires the ADMIN_READ_TOKEN bearer token.' },
@@ -296,6 +297,26 @@ const spec = {
           },
         },
       },
+    },
+    '/api/v1/webhook-subscriptions': {
+      post: {
+        tags: ['Webhooks'], summary: 'Create a signed webhook subscription',
+        security: [{ webhookAdmin: [] }],
+        requestBody: { required: true, content: json({ type: 'object', required: ['url', 'events'], properties: { url: { type: 'string', format: 'uri' }, events: { type: 'array', items: { type: 'string' } } } }) },
+        responses: { 201: { description: 'Created; the secret is returned only once', content: json({ $ref: '#/components/schemas/WebhookSubscription' }) }, 400: { description: 'Invalid URL or event filter' }, 401: { description: 'Missing or invalid admin token' }, 404: { description: 'Webhooks are not configured' } },
+      },
+      get: { tags: ['Webhooks'], summary: 'List webhook subscriptions', security: [{ webhookAdmin: [] }], responses: { 200: { description: 'Subscriptions' }, 401: { description: 'Missing or invalid admin token' }, 404: { description: 'Webhooks are not configured' } } },
+    },
+    '/api/v1/webhook-subscriptions/{id}': {
+      get: { tags: ['Webhooks'], summary: 'Get a webhook subscription', security: [{ webhookAdmin: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Subscription without secret' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found or disabled' } } },
+      patch: { tags: ['Webhooks'], summary: 'Update a webhook subscription', security: [{ webhookAdmin: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], requestBody: { content: json({ type: 'object' }) }, responses: { 200: { description: 'Updated subscription' }, 400: { description: 'Invalid update' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found' } } },
+      delete: { tags: ['Webhooks'], summary: 'Delete a webhook subscription', security: [{ webhookAdmin: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Deleted' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found' } } },
+    },
+    '/api/v1/webhook-subscriptions/{id}/rotate-secret': {
+      post: { tags: ['Webhooks'], summary: 'Rotate a webhook secret', security: [{ webhookAdmin: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'New secret; returned only once' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found' } } },
+    },
+    '/api/v1/webhook-subscriptions/{id}/deliveries': {
+      get: { tags: ['Webhooks'], summary: 'List bounded webhook delivery history', security: [{ webhookAdmin: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Delivery history' }, 401: { description: 'Unauthorized' }, 404: { description: 'Not found' } } },
     },
     '/api/v1/templates': {
       post: {
@@ -1058,6 +1079,7 @@ const spec = {
   },
   components: {
     securitySchemes: {
+      webhookAdmin: { type: 'http', scheme: 'bearer', description: 'Static WEBHOOK_ADMIN_TOKEN value' },
       adminToken: { type: 'http', scheme: 'bearer', description: 'Static ADMIN_READ_TOKEN value' },
       metricsToken: { type: 'http', scheme: 'bearer', description: 'Bearer token: METRICS_TOKEN' },
       bearerAuth: {
@@ -1102,6 +1124,8 @@ const spec = {
       },
     },
     schemas: {
+      WebhookSubscription: { type: 'object', required: ['id', 'url', 'events', 'active', 'createdAt', 'updatedAt'], properties: { id: { type: 'string' }, url: { type: 'string', format: 'uri' }, events: { type: 'array', items: { type: 'string' } }, active: { type: 'boolean' }, createdAt: { type: 'string', format: 'date-time' }, updatedAt: { type: 'string', format: 'date-time' } } },
+      WebhookDelivery: { type: 'object', properties: { id: { type: 'string' }, subscriptionId: { type: 'string' }, eventId: { type: 'string' }, eventType: { type: 'string' }, status: { type: 'string' }, attempts: { type: 'integer' }, statusCode: { type: 'integer' }, lastError: { type: 'string' }, createdAt: { type: 'string', format: 'date-time' }, updatedAt: { type: 'string', format: 'date-time' } } },
       ChainEscrow: {
         type: 'object',
         required: ['id', 'client', 'freelancer', 'token', 'milestones', 'totalAmount', 'fundedAmount', 'releasedAmount', 'status', 'reputationIssued', 'source', 'latestLedger'],
