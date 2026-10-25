@@ -48,6 +48,7 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | POST | `/api/v1/contracts/:id/reviews` | Two-sided review: `{ "reviewer": "G...", "rating": 5, "comment": "..." }` |
 | POST | `/api/v1/contracts/:id/link` | Link to on-chain escrow `{ "escrowId": "3" }` |
 | GET | `/api/v1/contracts/:id/parity` | Parity check report against on-chain state |
+| GET | `/api/v1/reputation` | Ranked freelancer leaderboard (`?sort=score\|completed\|average&minCompleted=&limit=&cursor=`) |
 | GET | `/api/v1/reputation/:address` | Reputation (freelancer fields + `asClient`) |
 | GET | `/api/v1/reputation/:address/reviews` | Reviews received (`?role=`, `?limit=`, `?cursor=`) |
 | GET | `/.well-known/talenttrust-receipts.json` | Published ed25519 public keys for offline verification |
@@ -182,7 +183,7 @@ Configuration (all optional, see `.env.example`): `PORT`, `LOG_LEVEL` (debug|inf
 `METRICS_TOKEN` (protects `GET /metrics`; when unset the endpoint is disabled),
 `CURSOR_SECRET` (signs contract-list cursors; random per-process default), `REQUIRE_IF_MATCH` (`true` makes `If-Match` mandatory on contract mutations),
 `ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`, `STELLAR_RPC_URL`, `STELLAR_NETWORK_PASSPHRASE`, `TX_TIMEOUT_SECONDS`, `FRONTEND_URL`, `IDEMPOTENCY_REQUIRED`, `AUTH_SECRET`, `AUTH_REQUIRED`,
-`BODY_LIMIT` (maximum request body size, default `100kb`),
+`BODY_LIMIT` (maximum request body size, default `100kb`), `REPUTATION_PRIOR_WEIGHT` (Bayesian prior weight C, default 5),
 `RECEIPT_SIGNING_SECRET` (Stellar `S...` ed25519 seed), and `CRON_SECRET` (required to authenticate
 `GET`/`POST /api/cron/expire-contracts`). New contracts default to a funding deadline 14 days after
 creation; explicit deadlines must be between one hour and 90 days in the future. Contracts still unfunded

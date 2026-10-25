@@ -564,6 +564,7 @@ export function createApp(
         'POST /api/v1/contracts/:id/reviews',
         'POST /api/v1/contracts/:id/link',
         'GET  /api/v1/contracts/:id/parity',
+        'GET  /api/v1/reputation',
         'GET  /api/v1/reputation/:address',
         'GET  /api/v1/reputation/:address/reviews',
         'POST /api/v1/templates',
@@ -928,6 +929,17 @@ export function createApp(
       maybeAttachReceipt(req, res, contract);
       return reputation;
     }),
+  );
+  v1.get(
+    '/reputation',
+    wrap((req) =>
+      store.listReputation({
+        sort: req.query.sort,
+        minCompleted: req.query.minCompleted,
+        limit: req.query.limit,
+        cursor: req.query.cursor,
+      }),
+    ),
   );
   v1.get(
     '/reputation/:address',

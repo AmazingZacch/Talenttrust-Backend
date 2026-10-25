@@ -803,6 +803,34 @@ const spec = {
         },
       },
     },
+    '/api/v1/reputation': {
+      get: {
+        tags: ['Reputation'],
+        summary: 'Ranked freelancer leaderboard (Bayesian score)',
+        description:
+          'score = round2((C * m + totalRating) / (C + completedContracts)) with m the global mean rating (3 when there ' +
+          'are none) and C = REPUTATION_PRIOR_WEIGHT (default 5). Ties break by completedContracts desc, then address.',
+        parameters: [
+          { name: 'sort', in: 'query', schema: { type: 'string', enum: ['score', 'completed', 'average'], default: 'score' } },
+          { name: 'minCompleted', in: 'query', schema: { type: 'integer', minimum: 0, default: 1 } },
+          { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 } },
+          { name: 'cursor', in: 'query', schema: { type: 'string' }, description: 'page.nextCursor from the previous page (same sort)' },
+        ],
+        responses: {
+          ...ok('Leaderboard page', {
+            type: 'object',
+            properties: {
+              data: { type: 'array', items: { $ref: '#/components/schemas/Reputation' } },
+              page: {
+                type: 'object',
+                properties: { limit: { type: 'integer' }, nextCursor: { type: 'string', nullable: true }, hasMore: { type: 'boolean' } },
+              },
+            },
+          }),
+          400: errorResponse('invalid_sort, invalid_min_completed, invalid_limit or invalid_cursor'),
+        },
+      },
+    },
     '/api/v1/reputation/{address}': {
       get: {
         tags: ['Reputation'],
@@ -1123,6 +1151,10 @@ const spec = {
           completedContracts: { type: 'integer' },
           totalRating: { type: 'integer' },
           averageRating: { type: 'number' },
+          score: { type: 'number', description: 'Bayesian score (see GET /api/v1/reputation)' },
+          rank: { type: 'integer', nullable: true, description: '1-based rank by score; null when unrated' },
+          histogram: { type: 'array', items: { type: 'integer' }, minItems: 5, maxItems: 5, description: 'Counts of 1★..5★ ratings' },
+          lastRatedAt: { type: 'string', format: 'date-time', nullable: true },
           asClient: {
             type: 'object',
             properties: {
