@@ -408,7 +408,38 @@ const spec = {
         },
       },
     },
-    '/health': { get: { tags: ['System'], summary: 'Health check', responses: ok('Service is healthy') } },
+    '/': {
+      get: {
+        tags: ['System'],
+        summary: 'Service index',
+        description: 'Service name, documentation links and the list of available endpoints.',
+        responses: ok('Service index', { $ref: '#/components/schemas/ServiceInfo' }),
+      },
+    },
+    '/docs': {
+      get: {
+        tags: ['System'],
+        summary: 'Swagger UI for this spec',
+        responses: { 200: { description: 'HTML page', content: { 'text/html': { schema: { type: 'string' } } } } },
+      },
+    },
+    '/openapi.json': {
+      get: { tags: ['System'], summary: 'This OpenAPI document', responses: ok('OpenAPI 3.0.3 document', { type: 'object' }) },
+    },
+    '/health': {
+      get: {
+        tags: ['System'],
+        summary: 'Health check',
+        responses: {
+          ...ok('Service is healthy', { $ref: '#/components/schemas/Health' }),
+          503: {
+            description: 'Draining during graceful shutdown (`Connection: close`)',
+            'x-plain-json': true,
+            content: json({ type: 'object', required: ['status'], properties: { status: { type: 'string', enum: ['draining'] } } }),
+          },
+        },
+      },
+    },
     '/.well-known/talenttrust-receipts.json': {
       get: {
         tags: ['Receipts'],
@@ -846,6 +877,10 @@ const spec = {
       },
     },
     responses: {
+      NotFound: {
+        description: 'No route matches the method and path (`not_found`, with `docs`)',
+        content: json({ $ref: '#/components/schemas/Error' }),
+      },
       InvalidIdempotencyKey: {
         description: 'Idempotency-Key is malformed (`invalid_idempotency_key`) or missing while required (`idempotency_key_required`)',
         content: json({ $ref: '#/components/schemas/Error' }),
@@ -1145,35 +1180,112 @@ const spec = {
       },
       Error: {
         type: 'object',
-        properties: { error: { type: 'string' }, message: { type: 'string' } },
+        description:
+          'Error envelope shared by every 4xx/5xx response (served as application/problem+json, see Problem). ' +
+          'Route-specific fields (details, contractError, currentVersion, docs, …) may be added.',
+        required: ['error', 'message'],
+        properties: {
+          error: { type: 'string', description: 'Machine-readable code (see GET /api/v1/errors)' },
+          message: { type: 'string' },
+          requestId: { type: 'string' },
+          docs: { type: 'string', description: 'Present on the global route-not-found 404' },
+          type: { type: 'string' },
+          title: { type: 'string' },
+          status: { type: 'integer' },
+          detail: { type: 'string' },
+        },
+      },
+      Milestone: {
+        type: 'object',
+        required: ['index', 'title', 'amount', 'amountUnits', 'released'],
+        additionalProperties: false,
+        properties: {
+          index: { type: 'integer', minimum: 0 },
+          title: { type: 'string' },
+          amount: {
+            description: 'DEPRECATED — lossy above 2^53. Use amountUnits.',
+            oneOf: [{ type: 'number' }, { type: 'string' }],
+          },
+          amountUnits: {
+            type: 'string',
+            description: 'Canonical decimal string amount in token base units (e.g. stroops).',
+          },
+          released: { type: 'boolean' },
+        },
+      },
+      Dispute: {
+        type: 'object',
+        required: ['raisedBy', 'openedAt'],
+        additionalProperties: false,
+        properties: {
+          raisedBy: { type: 'string' },
+          reason: { type: 'string', description: 'Confidential: only returned by the admin dispute routes' },
+          openedAt: { type: 'string', format: 'date-time' },
+          freelancerBps: { type: 'integer', minimum: 0, maximum: 10000 },
+          resolvedAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      ServiceInfo: {
+        type: 'object',
+        required: ['name', 'version', 'description', 'docs', 'openapi', 'endpoints'],
+        properties: {
+          name: { type: 'string' },
+          version: { type: 'string' },
+          description: { type: 'string' },
+          docs: { type: 'string' },
+          openapi: { type: 'string' },
+          website: { type: 'string' },
+          chain: {
+            type: 'object',
+            properties: { network: { type: 'string' }, contractId: { type: 'string' }, explorer: { type: 'string' } },
+          },
+          endpoints: { type: 'array', items: { type: 'string' } },
+        },
+      },
+      Health: {
+        type: 'object',
+        required: ['status', 'version', 'uptimeSeconds', 'storage', 'timestamp'],
+        properties: {
+          status: { type: 'string', enum: ['ok'] },
+          version: { type: 'string' },
+          uptimeSeconds: { type: 'integer', minimum: 0 },
+          storage: { type: 'string' },
+          paused: { type: 'boolean' },
+          pauseSource: { type: 'string', enum: ['chain', 'env', 'none'] },
+          timestamp: { type: 'string', format: 'date-time' },
+        },
       },
       EscrowContract: {
         type: 'object',
+        additionalProperties: false,
+        required: [
+          'id',
+          'title',
+          'client',
+          'freelancer',
+          'token',
+          'milestones',
+          'totalAmount',
+          'totalAmountUnits',
+          'fundedAmount',
+          'fundedAmountUnits',
+          'releasedAmount',
+          'releasedAmountUnits',
+          'status',
+          'reputationIssued',
+          'revision',
+          'version',
+          'fundingDeadline',
+          'createdAt',
+          'updatedAt',
+        ],
         properties: {
           id: { type: 'integer' },
           title: { type: 'string' },
           client: { type: 'string' },
           freelancer: { type: 'string' },
           token: { type: 'string' },
-          milestones: {
-            type: 'array',
-            items: {
-              type: 'object',
-              properties: {
-                index: { type: 'integer' },
-                title: { type: 'string' },
-                amount: {
-                  description: 'DEPRECATED — lossy above 2^53. Use amountUnits.',
-                  oneOf: [{ type: 'number' }, { type: 'string' }],
-                },
-                amountUnits: {
-                  type: 'string',
-                  description: 'Canonical decimal string amount in token base units (e.g. stroops).',
-                },
-                released: { type: 'boolean' },
-              },
-            },
-          },
+          milestones: { type: 'array', items: { $ref: '#/components/schemas/Milestone' } },
           totalAmount: {
             description: 'DEPRECATED — lossy above 2^53. Use totalAmountUnits.',
             oneOf: [{ type: 'number' }, { type: 'string' }],
@@ -1204,17 +1316,7 @@ const spec = {
           expiredAt: { type: 'string', format: 'date-time' },
           refundableAmount: { type: 'number', description: 'DEPRECATED — lossy above 2^53. Use refundableAmountUnits.' },
           refundableAmountUnits: { type: 'string', description: 'Partial funding returned to the client on expiry (base units).' },
-          dispute: {
-            type: 'object',
-            nullable: true,
-            properties: {
-              raisedBy: { type: 'string' },
-              reason: { type: 'string' },
-              openedAt: { type: 'string', format: 'date-time' },
-              freelancerBps: { type: 'integer' },
-              resolvedAt: { type: 'string', format: 'date-time' },
-            },
-          },
+          dispute: { $ref: '#/components/schemas/Dispute' },
           chain: { $ref: '#/components/schemas/ChainInfo' },
           revision: { type: 'integer', minimum: 1, description: 'Term revision; increments on every edit.' },
           templateId: { type: 'integer', description: 'Template the milestones were generated from' },
@@ -1612,12 +1714,18 @@ const problemContent = { 'application/problem+json': { schema: { $ref: '#/compon
  */
 function withProblems<T extends { paths: object; components: object }>(doc: T): T {
   const toProblem = (r: { $ref?: string; content?: Record<string, { schema?: object }> }) => {
-    if (r.$ref) return;
+    if (r.$ref || (r as { 'x-plain-json'?: boolean })['x-plain-json']) return;
     const schema = r.content?.['application/json']?.schema as { $ref?: string } | undefined;
-    // Keep a more specific error schema (e.g. ChainMismatchError) next to the Problem fields.
-    r.content = schema?.$ref && !/ErrorResponse$/.test(schema.$ref)
-      ? { 'application/problem+json': { schema: { allOf: [{ $ref: '#/components/schemas/Problem' }, schema] } } }
-      : problemContent;
+    // Every error documents the shared Error envelope (application/json) and the RFC 9457 view of the
+    // same body (application/problem+json, what the server sends). A more specific error schema
+    // (e.g. ChainMismatchError) is kept next to the Problem fields.
+    const specific = schema?.$ref && !/(ErrorResponse|Error)$/.test(schema.$ref) ? schema : undefined;
+    r.content = {
+      'application/json': { schema: { $ref: '#/components/schemas/Error' } },
+      'application/problem+json': {
+        schema: specific ? { allOf: [{ $ref: '#/components/schemas/Problem' }, specific] } : { $ref: '#/components/schemas/Problem' },
+      },
+    };
   };
   const paths = doc.paths as Record<string, Record<string, Operation>>;
   for (const item of Object.values(paths)) {
@@ -1625,7 +1733,11 @@ function withProblems<T extends { paths: object; components: object }>(doc: T): 
       for (const [code, r] of Object.entries(op.responses)) {
         if (/^[45]/.test(code)) toProblem(r as Parameters<typeof toProblem>[0]);
       }
-      if (!op.responses['500']) op.responses = { ...op.responses, 500: { description: 'Unexpected error (internal_error)', content: problemContent } };
+      if (!op.responses['500']) {
+        const internal = { description: 'Unexpected error (internal_error)', content: { ...problemContent } };
+        toProblem(internal);
+        op.responses = { ...op.responses, 500: internal };
+      }
     }
   }
   const responses = (doc.components as { responses?: Record<string, Parameters<typeof toProblem>[0]> }).responses ?? {};
