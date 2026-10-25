@@ -56,9 +56,20 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | GET/POST | `/api/cron/expire-contracts` | Authenticated daily sweep of due unfunded contracts |
 | GET | `/api/v1/disputes` | Admin dispute queue (`?status=`, `?sort=`, `?overdue=`, `?limit=`, `?cursor=`), requires `Authorization: Bearer $ADMIN_READ_TOKEN` |
 | GET | `/api/v1/disputes/:contractId` | Dispute view for one contract (404 if it never had a dispute), same auth |
+| GET | `/api/v1/contracts/:id/history` | Hash-chained audit history of a contract (`?limit=`, `?cursor=`) |
+| GET | `/api/v1/audit/verify` | Verify audit chain integrity (`{ valid, entries, brokenAt? }`) |
 | GET | `/metrics` | Prometheus exposition-format metrics (requires `Authorization: Bearer <METRICS_TOKEN>`; disabled when `METRICS_TOKEN` unset) |
 
 *Note: All contract mutation endpoints accept `?receipt=true` to attach a signed `Receipt` JWS header.*
+
+## Audit log
+
+Every successful state transition (`create`, `deposit`, `release`, `dispute`, `resolve`, `cancel`, `rate`) appends an
+entry with the before/after state (`status`, funded and released amounts), the authenticated actor, the request id and
+action details (e.g. the resolution split). Failed or rejected requests never create entries. Entries are hash-chained
+(`hash = sha256(prevHash + canonicalJSON(entry))`), so modification, deletion or reordering is detected by
+`GET /api/v1/audit/verify`. The log is in-memory and bounded (100,000 entries, oldest evicted first; verification then
+starts from the oldest retained entry). Dispute reasons are not recorded.
 
 ## Admin dispute queue
 

@@ -12,6 +12,7 @@
 
 import { parseAmount, checkedAdd, I128_MAX } from './amount';
 import { HttpError } from './amount-error';
+import { AuditStore, type AuditAction, type AuditContext, type AuditState } from './audit';
 
 export { HttpError } from './amount-error';
 
@@ -371,13 +372,19 @@ export class EscrowStore {
   private nextId = 1;
 
   private mutationRecorder: MutationRecorder = () => undefined;
+  /** Append-only, hash-chained audit log of successful state transitions. */
+  public audit: AuditStore = new AuditStore();
+  private auditContext: AuditContext | undefined;
 
   constructor(private readonly clock: Clock = () => new Date()) {
-    // Count every domain mutation as ok / <error code> for the metrics endpoint.
+    // Count every domain mutation as ok / <error code> for the metrics endpoint, and
+    // append an audit entry (before/after state) for every one that succeeds.
     for (const [method, action] of INSTRUMENTED_MUTATIONS) {
       const self = this as unknown as Record<string, (...args: unknown[]) => unknown>;
       const original = self[method].bind(this);
       self[method] = (...args: unknown[]) => {
+        const contractId = method === 'create' ? undefined : (args[0] as number);
+        const before = contractId === undefined ? undefined : this.auditState(contractId);
         let result: unknown;
         try {
           result = original(...args);
@@ -386,9 +393,71 @@ export class EscrowStore {
           throw err;
         }
         this.mutationRecorder(action, 'ok');
+        this.recordAudit(action as AuditAction, contractId ?? (result as { id: number }).id, before, args);
         return result;
       };
     }
+  }
+
+  /**
+   * Run `fn` with the given actor/request id attached to any audit entries it
+   * creates (store methods are synchronous, so the context cannot leak).
+   */
+  withAuditContext<T>(ctx: AuditContext, fn: () => T): T {
+    const previous = this.auditContext;
+    this.auditContext = ctx;
+    try {
+      return fn();
+    } finally {
+      this.auditContext = previous;
+    }
+  }
+
+  private auditState(id: number): AuditState | undefined {
+    const c = this.contracts.get(id);
+    if (!c) return undefined;
+    return {
+      status: c.status,
+      fundedAmount: Number(c.fundedAmount),
+      releasedAmount: Number(c.releasedAmount),
+      fundedAmountUnits: c.fundedAmount.toString(),
+      releasedAmountUnits: c.releasedAmount.toString(),
+    };
+  }
+
+  private recordAudit(action: AuditAction, contractId: number, before: AuditState | undefined, args: unknown[]) {
+    const c = this.contracts.get(contractId);
+    const after = this.auditState(contractId);
+    if (!c || !after) return;
+    const prev = before ?? { status: 'N/A', fundedAmount: 0, releasedAmount: 0, fundedAmountUnits: '0', releasedAmountUnits: '0' };
+    const delta = (field: 'fundedAmountUnits' | 'releasedAmountUnits') => BigInt(after[field]!) - BigInt(prev[field]!);
+    let details: Record<string, unknown> = {};
+    if (action === 'create') details = { title: c.title, totalAmount: Number(c.totalAmount), totalAmountUnits: c.totalAmount.toString() };
+    else if (action === 'deposit') details = { amount: Number(delta('fundedAmountUnits')), amountUnits: delta('fundedAmountUnits').toString() };
+    else if (action === 'release') {
+      details = { index: args[1], amount: Number(delta('releasedAmountUnits')), amountUnits: delta('releasedAmountUnits').toString() };
+    } else if (action === 'dispute') details = { raisedBy: c.dispute?.raisedBy }; // reason stays confidential
+    else if (action === 'resolve') {
+      const held = BigInt(prev.fundedAmountUnits!) - BigInt(prev.releasedAmountUnits!);
+      const toFreelancer = delta('releasedAmountUnits');
+      details = {
+        freelancerBps: c.dispute?.freelancerBps,
+        toFreelancer: Number(toFreelancer),
+        toClient: Number(held - toFreelancer),
+        toFreelancerUnits: toFreelancer.toString(),
+        toClientUnits: (held - toFreelancer).toString(),
+      };
+    } else if (action === 'rate') details = { rating: Number(args[1]) };
+    const ctx = this.auditContext ?? {};
+    this.audit.append({
+      contractId,
+      action,
+      ctx: { ...ctx, actor: ctx.actor ?? (action === 'dispute' ? c.dispute?.raisedBy : undefined) },
+      before: prev,
+      after,
+      details,
+      at: this.nowIso(),
+    });
   }
 
   /** Install a callback invoked once per mutation with its action and result (`ok` or error code). */

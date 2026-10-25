@@ -529,6 +529,8 @@ export function createApp(
         'GET  /api/v1/contracts/:id/parity',
         'GET  /api/v1/reputation/:address',
         'GET  /api/v1/reputation/:address/reviews',
+        'GET  /api/v1/contracts/:id/history',
+        'GET  /api/v1/audit/verify',
         'GET  /api/v1/disputes (admin)',
         'GET  /api/v1/disputes/:contractId (admin)',
         'GET  /api/v1/auth/challenge',
@@ -714,7 +716,7 @@ export function createApp(
     },
     validate({ body: CreateContractBody }),
     wrap((req, res) => {
-      const created = store.create(req.body);
+      const created = audited(req, () => store.create(req.body));
       res.setHeader('ETag', getContractEtag(created));
       maybeAttachReceipt(req, res, created);
       res.status(201).json(publicContract(created));
@@ -736,6 +738,10 @@ export function createApp(
       return { receipt: receiptManager().issueReceipt(publicContract(contract) as unknown as Record<string, unknown>, getOrigin(req)) };
     }),
   );
+  /** Attribute audit entries created by `fn` to the authenticated caller and request id. */
+  const audited = <T>(req: Request, fn: () => T): T =>
+    store.withAuditContext({ actor: callerOf(req), requestId: req.id }, fn);
+
   /** If-Match check for contract mutations: 412 on a stale tag, 428 when REQUIRE_IF_MATCH=true and absent. */
   const checkPreconditions = (req: Request, _res: Response, next: NextFunction) => {
     try {
@@ -804,7 +810,7 @@ export function createApp(
     validate({ params: IdParam, body: DepositBody }),
     checkPreconditions,
     wrap((req, res) => {
-      const updated = store.deposit(Number(req.params.id), req.body.amount, callerOf(req));
+      const updated = audited(req, () => store.deposit(Number(req.params.id), req.body.amount, callerOf(req)));
       setEtag(res, updated);
       maybeAttachReceipt(req, res, updated);
       return publicContract(updated);
@@ -817,7 +823,7 @@ export function createApp(
     validate({ params: MilestoneReleaseParams }),
     checkPreconditions,
     wrap((req, res) => {
-      const updated = store.release(Number(req.params.id), Number(req.params.index), callerOf(req));
+      const updated = audited(req, () => store.release(Number(req.params.id), Number(req.params.index), callerOf(req)));
       setEtag(res, updated);
       maybeAttachReceipt(req, res, updated);
       return publicContract(updated);
@@ -830,7 +836,9 @@ export function createApp(
     validate({ params: IdParam, body: DisputeBody }),
     checkPreconditions,
     wrap((req, res) => {
-      const updated = store.openDispute(Number(req.params.id), req.body.raisedBy, req.body.reason, callerOf(req));
+      const updated = audited(req, () =>
+        store.openDispute(Number(req.params.id), req.body.raisedBy, req.body.reason, callerOf(req)),
+      );
       setEtag(res, updated);
       maybeAttachReceipt(req, res, updated);
       return publicContract(updated);
@@ -841,7 +849,7 @@ export function createApp(
     validate({ params: IdParam, body: ResolveBody }),
     checkPreconditions,
     wrap((req, res) => {
-      const updated = store.resolveDispute(Number(req.params.id), req.body.freelancerBps);
+      const updated = audited(req, () => store.resolveDispute(Number(req.params.id), req.body.freelancerBps));
       setEtag(res, updated);
       maybeAttachReceipt(req, res, updated);
       return publicContract(updated);
@@ -854,7 +862,7 @@ export function createApp(
     validate({ params: IdParam, body: CancelBody }),
     checkPreconditions,
     wrap((req, res) => {
-      const updated = store.cancel(Number(req.params.id), callerOf(req));
+      const updated = audited(req, () => store.cancel(Number(req.params.id), callerOf(req)));
       setEtag(res, updated);
       maybeAttachReceipt(req, res, updated);
       return publicContract(updated);
@@ -866,7 +874,7 @@ export function createApp(
     validate({ params: IdParam, body: RateBody }),
     checkPreconditions,
     wrap((req, res) => {
-      const reputation = store.rate(Number(req.params.id), req.body.rating, callerOf(req));
+      const reputation = audited(req, () => store.rate(Number(req.params.id), req.body.rating, callerOf(req)));
       // The ETag and receipt cover the contract (now reputationIssued), not the reputation summary.
       const contract = store.get(Number(req.params.id));
       setEtag(res, contract);
@@ -941,6 +949,25 @@ export function createApp(
       return { valid: true, kid: verified.kid, iat: verified.iat, contractId: verified.contractId, matchesCurrent };
     }),
   );
+
+  // --- Audit log ---
+  v1.get(
+    '/contracts/:id/history',
+    wrap((req) => {
+      const contractId = id(req);
+      store.get(contractId); // 404 for unknown contracts
+      const limit = req.query.limit === undefined ? undefined : Number(req.query.limit);
+      const cursor = req.query.cursor === undefined ? undefined : Number(req.query.cursor);
+      if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 100)) {
+        throw new HttpError(400, 'invalid_limit', 'limit must be an integer between 1 and 100');
+      }
+      if (cursor !== undefined && (!Number.isInteger(cursor) || cursor < 0)) {
+        throw new HttpError(400, 'invalid_cursor', 'cursor must be a non-negative integer');
+      }
+      return store.audit.getContractHistory(contractId, limit, cursor);
+    }),
+  );
+  v1.get('/audit/verify', wrap(() => store.audit.verify()));
 
   // --- Admin dispute queue (ADMIN_READ_TOKEN) ---
   const disputeNow = () => new Date(store.currentTime());

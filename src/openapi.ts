@@ -161,9 +161,46 @@ const spec = {
     { name: 'Transaction' },
     { name: 'Receipts' },
     { name: 'Cron' },
+    { name: 'Audit', description: 'Tamper-evident, hash-chained log of escrow state transitions' },
     { name: 'Disputes', description: 'Admin dispute queue. Requires the ADMIN_READ_TOKEN bearer token.' },
   ],
   paths: {
+    '/api/v1/contracts/{id}/history': {
+      get: {
+        tags: ['Audit'],
+        summary: 'Get the audit history (successful state transitions) of a contract',
+        parameters: [
+          idParam,
+          { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100 }, description: 'Maximum number of entries to return' },
+          { name: 'cursor', in: 'query', schema: { type: 'integer' }, description: 'Sequence number to start after (from nextCursor)' },
+        ],
+        responses: {
+          ...ok('Audit history', {
+            type: 'object',
+            properties: {
+              data: { type: 'array', items: { $ref: '#/components/schemas/AuditEntry' } },
+              nextCursor: { type: 'integer', description: 'Absent on the last page' },
+            },
+          }),
+          400: errorResponse('Invalid id, limit or cursor'),
+          404: errorResponse('Contract not found'),
+        },
+      },
+    },
+    '/api/v1/audit/verify': {
+      get: {
+        tags: ['Audit'],
+        summary: 'Verify the integrity of the hash-chained audit log',
+        responses: ok('Verification result', {
+          type: 'object',
+          properties: {
+            valid: { type: 'boolean' },
+            entries: { type: 'integer' },
+            brokenAt: { type: 'integer', description: 'seq of the first entry whose hash does not verify' },
+          },
+        }),
+      },
+    },
     '/api/v1/disputes': {
       get: {
         tags: ['Disputes'],
@@ -772,6 +809,43 @@ const spec = {
       },
     },
     schemas: {
+      AuditEntry: {
+        type: 'object',
+        description:
+          'hash = sha256(prevHash + canonicalJSON(entry without hash/prevHash)); the first entry chains from 64 zeros. ' +
+          'Dispute reasons are never recorded.',
+        properties: {
+          seq: { type: 'integer' },
+          contractId: { type: 'integer' },
+          action: { type: 'string', enum: ['create', 'deposit', 'release', 'dispute', 'resolve', 'cancel', 'rate'] },
+          actor: { type: 'string', nullable: true, description: 'Authenticated wallet address (or the dispute raiser)' },
+          requestId: { type: 'string', nullable: true },
+          at: { type: 'string', format: 'date-time' },
+          before: {
+            type: 'object',
+            properties: {
+              status: { type: 'string' },
+              fundedAmount: { type: 'number', description: 'DEPRECATED — lossy above 2^53. Use fundedAmountUnits.' },
+              releasedAmount: { type: 'number', description: 'DEPRECATED — lossy above 2^53. Use releasedAmountUnits.' },
+              fundedAmountUnits: { type: 'string' },
+              releasedAmountUnits: { type: 'string' },
+            },
+          },
+          after: {
+            type: 'object',
+            properties: {
+              status: { type: 'string' },
+              fundedAmount: { type: 'number', description: 'DEPRECATED — lossy above 2^53. Use fundedAmountUnits.' },
+              releasedAmount: { type: 'number', description: 'DEPRECATED — lossy above 2^53. Use releasedAmountUnits.' },
+              fundedAmountUnits: { type: 'string' },
+              releasedAmountUnits: { type: 'string' },
+            },
+          },
+          details: { type: 'object' },
+          prevHash: { type: 'string' },
+          hash: { type: 'string' },
+        },
+      },
       DisputeView: {
         type: 'object',
         required: ['contractId', 'title', 'client', 'freelancer', 'raisedBy', 'raisedByRole', 'reason', 'openedAt', 'ageHours', 'held', 'heldUnits', 'slaDeadline', 'overdue'],
