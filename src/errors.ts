@@ -114,6 +114,7 @@ export const ERRORS = {
   insufficient_scope: { status: 403, title: 'Insufficient scope', detail: 'The API key does not have the required scope' },
   invalid_range: { status: 400, title: 'Invalid range', detail: 'from/to must be valid ISO dates, from before to, at most 3 years apart' },
   invalid_role: { status: 400, title: 'Invalid role', detail: 'role must be client, freelancer, or all' },
+  invalid_actor: { status: 400, title: 'Invalid actor', detail: 'as must be a single non-empty address string' },
   origin_not_allowed: { status: 403, title: 'Origin not allowed', detail: 'Origin is not allowed by CORS policy' },
   // On-chain pause
   contract_paused: {

@@ -20,6 +20,7 @@ import { openapi, docsHtml, docsCsp } from './openapi';
 import { allowlist, corsOptionsFor, originGuard } from './cors';
 import { methodNotAllowed, optionsHandler } from './methods';
 import { CSV_HEADERS, csvRow } from './csv';
+import { describeStateMachine } from './stateMachine';
 import { parseApiKeysConfig, type ParsedApiKeys } from './auth/apiKeysConfig';
 import { authenticateScopedApiKey, requireScope, type ScopedApiKeyRequest } from './auth/scopedApiKeyMiddleware';
 import { SCOPES } from './auth/scopes';
@@ -719,6 +720,8 @@ export function createApp(
         'GET  /api/v1/chain/reputation/:address',
         'GET  /api/v1/parties/:address/statement.csv',
         'GET  /api/v1/parties/:address/statement.json',
+        'GET  /api/v1/state-machine',
+        'GET  /api/v1/contracts/:id/actions',
         'GET  /api/v1/stats',
         'POST /api/v1/tx/build',
         'GET  /api/v1/contracts',
@@ -1035,6 +1038,19 @@ export function createApp(
     wrap((req) => {
       const { address, from, to, role } = parseStatementParams(req);
       return { address, from: from.toISOString(), to: to.toISOString(), role, data: store.getStatement(address, from, to, role) };
+    }),
+  );
+  // --- Escrow state machine discovery (read-only, same rules as the mutations) ---
+  v1.get('/state-machine', wrap(() => describeStateMachine()));
+  v1.get(
+    '/contracts/:id/actions',
+    wrap((req) => {
+      const contractId = id(req);
+      const as = req.query.as;
+      if (as !== undefined && (typeof as !== 'string' || !as.trim())) {
+        throw new HttpError(400, 'invalid_actor', 'as must be a non-empty address string');
+      }
+      return store.allowedActions(contractId, as as string | undefined);
     }),
   );
   v1.get('/stats', wrap(() => store.stats()));

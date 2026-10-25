@@ -14,6 +14,7 @@ import { parseAmount, checkedAdd, I128_MAX } from './amount';
 import { HttpError } from './amount-error';
 import { AuditStore, type AuditAction, type AuditContext, type AuditState } from './audit';
 import { StoreEventEmitter } from './events';
+import { allowedActions, assertAllowed, TRANSITIONS, type AllowedAction } from './stateMachine';
 
 export { HttpError } from './amount-error';
 
@@ -417,7 +418,6 @@ const parseIsoMillis = (value: unknown): number | undefined => {
   return Number.isFinite(millis) ? millis : undefined;
 };
 const MAX_REVISIONS = 50;
-const ACTIVE: ContractStatus[] = ['Created', 'Funded'];
 
 /** Validate a milestones array into internal (bigint) milestones. */
 function parseMilestones(input: unknown): InternalContract['milestones'] {
@@ -860,13 +860,9 @@ export class EscrowStore {
     this.contracts.delete(id);
   }
 
-  private requireActive(c: InternalContract) {
-    if (c.status === 'Expired') {
-      throw new HttpError(409, 'contract_expired', 'Contract funding deadline has passed');
-    }
-    if (!ACTIVE.includes(c.status)) {
-      throw new HttpError('contract_not_active', `Contract is ${c.status}`);
-    }
+  /** Allowed actions for contract `id` per the shared state machine (`as` only affects the dispute party check). */
+  allowedActions(id: number, as?: string): { status: ContractStatus; actions: AllowedAction[] } {
+    return allowedActions(this.getInternal(id), as);
   }
 
   /**
@@ -891,16 +887,9 @@ export class EscrowStore {
   deposit(id: number, amountRaw: unknown, caller?: string): EscrowContract {
     const c = this.getInternal(id);
     this.requireClient(c, caller, 'deposit');
-    this.requireActive(c);
-
-    const amount = parseAmount(amountRaw, 'amount');
-
-    const newFunded = checkedAdd(c.fundedAmount, amount, 'fundedAmount');
-    if (newFunded > c.totalAmount) {
-      throw new HttpError(409, 'over_funded', 'deposit exceeds contract total');
-    }
-    c.fundedAmount = newFunded;
-    if (c.fundedAmount === c.totalAmount) c.status = 'Funded';
+    assertAllowed('deposit', c, { amount: amountRaw });
+    c.fundedAmount = checkedAdd(c.fundedAmount, parseAmount(amountRaw, 'amount'), 'fundedAmount');
+    c.status = TRANSITIONS.deposit.nextStatus(c);
     return this.touch(c);
   }
 
@@ -908,18 +897,11 @@ export class EscrowStore {
   release(id: number, index: number, caller?: string): EscrowContract {
     const c = this.getInternal(id);
     this.requireClient(c, caller, 'release milestones');
-    this.requireActive(c);
+    assertAllowed('release', c, { index });
     const m = c.milestones[index];
-    if (!m) throw new HttpError(404, 'milestone_not_found', `Milestone ${index} not found`);
-    if (m.released) throw new HttpError(409, 'already_released', 'Milestone already released');
-
-    const balance = c.fundedAmount - c.releasedAmount;
-    if (balance < m.amount) {
-      throw new HttpError(409, 'insufficient_funds', 'Escrow balance too low for this milestone');
-    }
-    m.released = true;
     c.releasedAmount = checkedAdd(c.releasedAmount, m.amount, 'releasedAmount');
-    if (c.milestones.every((x) => x.released)) c.status = 'Completed';
+    m.released = true;
+    c.status = TRANSITIONS.release.nextStatus(c);
     return this.touch(c);
   }
 
@@ -939,11 +921,9 @@ export class EscrowStore {
         throw new HttpError(403, 'forbidden', 'raisedBy must match the authenticated address');
       }
       raisedBy = caller;
-    } else if (raisedBy !== c.client && raisedBy !== c.freelancer) {
-      throw new HttpError('forbidden', 'Only the client or freelancer can open a dispute');
     }
-    this.requireActive(c);
-    c.status = 'Disputed';
+    assertAllowed('dispute', c, { raisedBy });
+    c.status = TRANSITIONS.dispute.nextStatus(c);
     c.dispute = {
       raisedBy: raisedBy as string,
       reason: typeof reason === 'string' && reason ? reason : 'No reason given',
@@ -955,13 +935,8 @@ export class EscrowStore {
   /** `resolvedBy` is the id of the scoped API key that authorised the resolution, if any. */
   resolveDispute(id: number, freelancerBpsRaw: unknown, resolvedBy?: string): EscrowContract {
     const c = this.getInternal(id);
-    if (c.status !== 'Disputed') {
-      throw new HttpError('contract_not_disputed', 'Only disputed contracts can be resolved');
-    }
+    assertAllowed('resolve', c, { freelancerBps: freelancerBpsRaw });
     const bps = Number(freelancerBpsRaw);
-    if (!Number.isInteger(bps) || bps < 0 || bps > 10000) {
-      throw new HttpError(400, 'invalid_split', 'freelancerBps must be an integer between 0 and 10000');
-    }
     // Mirror the contract's integer arithmetic exactly:
     //   to_freelancer = held * bps / 10000  (integer division — truncation)
     //   to_client     = held - to_freelancer
@@ -969,7 +944,7 @@ export class EscrowStore {
     const held = c.fundedAmount - c.releasedAmount;
     const toFreelancer = (held * BigInt(bps)) / 10000n;
     c.releasedAmount = c.releasedAmount + toFreelancer;
-    c.status = 'Resolved';
+    c.status = TRANSITIONS.resolve.nextStatus(c);
     if (c.dispute) {
       c.dispute.freelancerBps = bps;
       c.dispute.resolvedAt = this.nowIso();
@@ -982,8 +957,8 @@ export class EscrowStore {
   cancel(id: number, caller?: string): EscrowContract {
     const c = this.getInternal(id);
     this.requireClient(c, caller, 'cancel');
-    this.requireActive(c);
-    c.status = 'Cancelled';
+    assertAllowed('cancel', c);
+    c.status = TRANSITIONS.cancel.nextStatus(c);
     return this.touch(c);
   }
 
@@ -1097,12 +1072,7 @@ export class EscrowStore {
   rate(id: number, ratingRaw: unknown, caller?: string): Reputation {
     const c = this.getInternal(id);
     this.requireClient(c, caller, 'issue reputation');
-    if (c.status !== 'Completed') {
-      throw new HttpError('contract_not_completed', 'Only completed contracts can issue reputation');
-    }
-    if (c.reputationIssued) {
-      throw new HttpError(409, 'reputation_already_issued', 'Reputation already issued for this contract');
-    }
+    assertAllowed('rate', c, { rating: ratingRaw });
     const rating = this.validateRating(ratingRaw);
     this.createReview(id, { reviewer: c.client, rating });
     return this.getReputation(c.freelancer);

@@ -856,6 +856,33 @@ const spec = {
         },
       },
     },
+    '/api/v1/state-machine': {
+      get: {
+        tags: ['Contracts'],
+        summary: 'Escrow lifecycle transition table and Mermaid diagram',
+        description:
+          'The same table the store enforces. `actorEnforced` is true only where the store itself checks the caller ' +
+          '(dispute); client-only actions are enforced for wallet-authenticated callers and resolve by scoped API keys. ' +
+          'Errors are reported in `checkOrder`: existence, actor, status, guards.',
+        responses: ok('State machine', { $ref: '#/components/schemas/StateMachine' }),
+      },
+    },
+    '/api/v1/contracts/{id}/actions': {
+      get: {
+        tags: ['Contracts'],
+        summary: 'Actions currently allowed on a contract',
+        description:
+          'For each action: whether it is allowed now, otherwise the error code and reason the mutation would return, ' +
+          'plus `maxDeposit` (remaining funding capacity, base units) and releasable milestone indexes. `as` is an ' +
+          'advisory caller address used only for the dispute party check.',
+        parameters: [idParam, { name: 'as', in: 'query', required: false, schema: { type: 'string', minLength: 1 } }],
+        responses: {
+          ...ok('Allowed actions', { $ref: '#/components/schemas/AllowedActions' }),
+          400: errorResponse('Invalid id or `as` (invalid_actor)'),
+          404: errorResponse('Contract not found'),
+        },
+      },
+    },
     '/api/v1/stats': { get: { tags: ['System'], summary: 'Aggregate escrow statistics', responses: ok('Stats', { type: 'object', properties: { contracts: { type: 'integer' }, byStatus: { type: 'object' }, totalEscrowed: { description: 'DEPRECATED — lossy above 2^53. Use totalEscrowedUnits.', oneOf: [{ type: 'number' }] }, totalEscrowedUnits: { type: 'string', description: 'Total escrowed in token base units (bigint-safe decimal string).' }, totalReleased: { description: 'DEPRECATED — lossy above 2^53. Use totalReleasedUnits.', oneOf: [{ type: 'number' }] }, totalReleasedUnits: { type: 'string', description: 'Total released in token base units (bigint-safe decimal string).' } } }) } },
     '/api/v1/tx/build': {
       post: {
@@ -1344,6 +1371,54 @@ const spec = {
       },
     },
     schemas: {
+      AllowedActions: {
+        type: 'object',
+        required: ['status', 'actions'],
+        properties: {
+          status: { type: 'string', enum: ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled', 'Expired'] },
+          actions: {
+            type: 'array',
+            items: {
+              type: 'object',
+              required: ['action', 'allowed'],
+              properties: {
+                action: { type: 'string', enum: ['deposit', 'release', 'dispute', 'resolve', 'cancel', 'rate'] },
+                allowed: { type: 'boolean' },
+                code: { type: 'string', description: 'Error code the mutation would return when not allowed' },
+                reason: { type: 'string' },
+                params: {
+                  type: 'object',
+                  properties: {
+                    maxDeposit: { type: 'string', description: 'Remaining funding capacity in base units' },
+                    index: { type: 'array', items: { type: 'integer' }, description: 'Releasable milestone indexes' },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      StateMachine: {
+        type: 'object',
+        required: ['checkOrder', 'transitions', 'mermaid'],
+        properties: {
+          checkOrder: { type: 'array', items: { type: 'string' } },
+          transitions: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                action: { type: 'string' },
+                from: { type: 'array', items: { type: 'string' } },
+                actor: { type: 'string', enum: ['client', 'freelancer', 'party', 'admin'] },
+                actorEnforced: { type: 'boolean' },
+                next: { type: 'object', properties: { status: { type: 'string' }, when: { type: 'string' } } },
+              },
+            },
+          },
+          mermaid: { type: 'string', description: 'Mermaid stateDiagram-v2 source' },
+        },
+      },
       StatementRow: {
         type: 'object',
         description: 'One row in an escrow activity statement.',

@@ -38,6 +38,8 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | GET/POST | `/api/cron/index-events` | Index a batch of contract events (`Authorization: Bearer $CRON_SECRET`) |
 | GET | `/api/v1/parties/:address/statement.csv` | Downloadable RFC 4180 CSV statement for an address (`?from=&to=&role=client\|freelancer\|all&bom=true`; formula-injection safe) |
 | GET | `/api/v1/parties/:address/statement.json` | Same rows as JSON |
+| GET | `/api/v1/state-machine` | Transition table, actor enforcement metadata and generated Mermaid diagram |
+| GET | `/api/v1/contracts/:id/actions?as=<address>` | Allowed actions now, with error codes/reasons, releasable indexes and remaining deposit capacity |
 | GET | `/api/v1/stats` | Aggregate statistics |
 | GET | `/api/v1/auth/whoami` | Id and scopes of the presented scoped API key |
 | GET | `/api/v1/auth/challenge` | Request a sign challenge (`?address=G…`) |
@@ -245,6 +247,20 @@ network passphrase, the escrow contract's ledger entry and the store — and ans
 single-flight, so a burst of probes performs at most one round of RPC calls. Failure details are
 fixed strings and never include the RPC URL. `/health/live` never touches a dependency, and
 `/health` reports the summary of the last readiness run once one has happened.
+
+## Lifecycle discovery
+
+The store and the discovery endpoints share `src/stateMachine.ts`, so discovery can never disagree with what the
+mutations accept. Checks run in order: contract existence → actor → status → guards (the order the API has always
+used). Discovery is read-only; `allowed` means there is a valid argument for that action right now.
+`release.params.index` lists the currently releasable milestones and `deposit.params.maxDeposit` is the remaining
+funding capacity as an exact base-unit decimal string.
+
+`as` is an optional advisory address, used as `raisedBy` for the dispute party check (missing `as` makes dispute
+unavailable); empty, repeated or structured values return `400 invalid_actor`. It is not authentication: only
+`dispute` is actor-checked by the store itself (`actorEnforced: true`). Client-only actions are enforced for
+wallet-authenticated callers and dispute resolution by scoped API keys, so their roles are listed with
+`actorEnforced: false`.
 
 ## Development
 
