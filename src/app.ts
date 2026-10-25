@@ -24,6 +24,7 @@ import { createLogger, type Logger, randomUUID } from './logger';
 import { ChainReader, SorobanRpcChainReader } from './chain';
 import { buildEscrowTransaction, TxBuildError, type RpcClient } from './stellar/escrowTxBuilder';
 import { bigIntReplacer } from './amount';
+import { createRegistry, type Registry, HTTP_DURATION_BUCKETS, constantTimeEqual } from './metrics';
 import { createHash, timingSafeEqual } from 'crypto';
 import { StrKey, Keypair } from '@stellar/stellar-sdk';
 import { randomBytes } from 'crypto';
@@ -116,6 +117,8 @@ export type AppDeps = {
   now?: () => number;
   /** Signs contract-state receipts; defaults to RECEIPT_SIGNING_SECRET or an ephemeral key. */
   receiptManager?: ReceiptManager;
+  /** Prometheus registry; each app gets its own unless one is injected. */
+  registry?: Registry;
 };
 
 /**
@@ -155,6 +158,7 @@ export interface AppOptions {
   idempotencyStore?: IdempotencyStore;
   idempotencyRequired?: boolean;
   receiptManager?: ReceiptManager;
+  registry?: Registry;
 }
 
 export function createApp(
@@ -190,6 +194,36 @@ export function createApp(
     res.set('X-Request-Id', requestId);
     next();
   });
+
+  // HTTP RED metrics: request counter and latency histogram, labelled by route pattern.
+  const registry = options.registry ?? deps.registry ?? createRegistry();
+  const httpRequestsTotal = registry.counter('http_requests_total', 'Total number of HTTP requests', [
+    'method',
+    'route',
+    'status',
+  ]);
+  const httpRequestDuration = registry.histogram(
+    'http_request_duration_seconds',
+    'HTTP request duration in seconds',
+    ['method', 'route'],
+    HTTP_DURATION_BUCKETS,
+  );
+  app.use((req, res, next) => {
+    const start = Date.now();
+    res.on('finish', () => {
+      const route = req.route ? String(req.baseUrl || '') + String(req.route.path || '') : 'unmatched';
+      httpRequestsTotal.inc({ method: req.method, route, status: String(res.statusCode) });
+      httpRequestDuration.observe({ method: req.method, route }, (Date.now() - start) / 1000);
+    });
+    next();
+  });
+
+  // Domain mutation counter, incremented from the store layer.
+  const escrowMutationsTotal = registry.counter('escrow_mutations_total', 'Total number of escrow mutations', [
+    'action',
+    'result',
+  ]);
+  store.setMutationRecorder((action, result) => escrowMutationsTotal.inc({ action, result }));
 
   app.use(helmet({ contentSecurityPolicy: false }));
   app.use(cors());
@@ -259,6 +293,7 @@ export function createApp(
         'GET  /health',
         'GET  /docs',
         'GET  /openapi.json',
+        'GET  /metrics',
         'GET  /.well-known/talenttrust-receipts.json',
         'GET  /api/v1/chain',
         'GET  /api/v1/stats',
@@ -598,6 +633,28 @@ export function createApp(
   });
   app.get('/api/cron/expire-contracts', expireContracts);
   app.post('/api/cron/expire-contracts', expireContracts);
+
+  // Prometheus scrape endpoint; disabled (404) unless METRICS_TOKEN is set, checked per request.
+  const escrowContracts = registry.gauge('escrow_contracts', 'Escrow contracts by status', ['status']);
+  const escrowValueEscrowed = registry.gauge('escrow_value_escrowed', 'Value currently escrowed (base units)', []);
+  const escrowValueReleased = registry.gauge('escrow_value_released', 'Value released (base units)', []);
+  const processUptime = registry.gauge('process_uptime_seconds', 'Process uptime in seconds', []);
+  const nodejsHeapUsed = registry.gauge('nodejs_heap_used_bytes', 'Node.js heap used in bytes', []);
+  app.get('/metrics', (req, res, next) => {
+    const token = process.env.METRICS_TOKEN;
+    if (!token) return next(new HttpError(404, 'not_found', 'Metrics endpoint disabled'));
+    const auth = req.headers.authorization;
+    if (!auth || !constantTimeEqual(auth, `Bearer ${token}`)) {
+      return next(new HttpError(401, 'unauthorized', 'Invalid metrics token'));
+    }
+    const stats = store.stats();
+    for (const [status, count] of Object.entries(stats.byStatus)) escrowContracts.set({ status }, count);
+    escrowValueEscrowed.set({}, stats.totalEscrowed);
+    escrowValueReleased.set({}, stats.totalReleased);
+    processUptime.set({}, process.uptime());
+    nodejsHeapUsed.set({}, process.memoryUsage().heapUsed);
+    res.type('text/plain; version=0.0.4').send(registry.exposition());
+  });
 
   app.use((req, res) => {
     res.status(404).json({ error: 'not_found', message: `No route for ${req.method} ${req.path}`, requestId: req.id, docs: '/docs' });

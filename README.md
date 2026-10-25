@@ -50,6 +50,7 @@ data is per-instance and resets on redeploy.
 | GET | `/api/v1/contracts/:id/receipt` | Get detached signed JWS receipt for contract state |
 | POST | `/api/v1/receipts/verify` | Verify JWS receipt and check against current state |
 | GET/POST | `/api/cron/expire-contracts` | Authenticated daily sweep of due unfunded contracts |
+| GET | `/metrics` | Prometheus exposition-format metrics (requires `Authorization: Bearer <METRICS_TOKEN>`; disabled when `METRICS_TOKEN` unset) |
 
 *Note: All contract mutation endpoints accept `?receipt=true` to attach a signed `Receipt` JWS header.*
 
@@ -141,6 +142,7 @@ npm run build && npm start
 ```
 
 Configuration (all optional, see `.env.example`): `PORT`, `LOG_LEVEL` (debug|info|warn|error|silent, default info; silent in tests),
+`METRICS_TOKEN` (protects `GET /metrics`; when unset the endpoint is disabled),
 `ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`, `STELLAR_RPC_URL`, `STELLAR_NETWORK_PASSPHRASE`, `TX_TIMEOUT_SECONDS`, `FRONTEND_URL`, `IDEMPOTENCY_REQUIRED`, `AUTH_SECRET`, `AUTH_REQUIRED`,
 `RECEIPT_SIGNING_SECRET` (Stellar `S...` ed25519 seed), and `CRON_SECRET` (required to authenticate
 `GET`/`POST /api/cron/expire-contracts`). New contracts default to a funding deadline 14 days after

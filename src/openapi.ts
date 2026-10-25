@@ -163,6 +163,22 @@ const spec = {
     { name: 'Cron' },
   ],
   paths: {
+    '/metrics': {
+      get: {
+        tags: ['System'],
+        summary: 'Prometheus metrics endpoint',
+        description:
+          'Returns Prometheus exposition format text (HTTP RED metrics by route pattern, escrow gauges, ' +
+          '`escrow_mutations_total{action,result}`, process metrics). Requires `Authorization: Bearer <METRICS_TOKEN>`. ' +
+          'Returns 404 when METRICS_TOKEN is unset (endpoint disabled).',
+        security: [{ metricsToken: [] }],
+        responses: {
+          200: { description: 'Prometheus exposition format', content: { 'text/plain': { schema: { type: 'string' } } } },
+          401: errorResponse('Invalid or missing metrics token'),
+          404: errorResponse('Metrics endpoint disabled (METRICS_TOKEN not set)'),
+        },
+      },
+    },
     '/api/cron/expire-contracts': {
       get: {
         tags: ['Cron'],
@@ -616,6 +632,7 @@ const spec = {
   },
   components: {
     securitySchemes: {
+      metricsToken: { type: 'http', scheme: 'bearer', description: 'Bearer token: METRICS_TOKEN' },
       bearerAuth: {
         type: 'http',
         scheme: 'bearer',

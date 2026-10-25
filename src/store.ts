@@ -156,6 +156,19 @@ const MAX_FUNDING_WINDOW_MS = 90 * DAY_MS;
 
 export type Clock = () => Date;
 
+export type MutationRecorder = (action: string, result: string) => void;
+
+/** Store methods counted by escrow_mutations_total, mapped to their `action` label. */
+const INSTRUMENTED_MUTATIONS: Array<[string, string]> = [
+  ['create', 'create'],
+  ['deposit', 'deposit'],
+  ['release', 'release'],
+  ['openDispute', 'dispute'],
+  ['resolveDispute', 'resolve'],
+  ['cancel', 'cancel'],
+  ['rate', 'rate'],
+];
+
 const parseIsoMillis = (value: unknown): number | undefined => {
   if (
     typeof value !== 'string' ||
@@ -248,7 +261,31 @@ export class EscrowStore {
   private nextReviewId = 1;
   private nextId = 1;
 
-  constructor(private readonly clock: Clock = () => new Date()) {}
+  private mutationRecorder: MutationRecorder = () => undefined;
+
+  constructor(private readonly clock: Clock = () => new Date()) {
+    // Count every domain mutation as ok / <error code> for the metrics endpoint.
+    for (const [method, action] of INSTRUMENTED_MUTATIONS) {
+      const self = this as unknown as Record<string, (...args: unknown[]) => unknown>;
+      const original = self[method].bind(this);
+      self[method] = (...args: unknown[]) => {
+        let result: unknown;
+        try {
+          result = original(...args);
+        } catch (err) {
+          this.mutationRecorder(action, err instanceof HttpError ? err.code : 'error');
+          throw err;
+        }
+        this.mutationRecorder(action, 'ok');
+        return result;
+      };
+    }
+  }
+
+  /** Install a callback invoked once per mutation with its action and result (`ok` or error code). */
+  setMutationRecorder(recorder: MutationRecorder): void {
+    this.mutationRecorder = recorder;
+  }
 
   private now(): Date {
     return this.clock();
