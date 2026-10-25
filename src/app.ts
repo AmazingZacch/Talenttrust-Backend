@@ -18,6 +18,7 @@ import {
 } from './store';
 import { openapi, docsHtml } from './openapi';
 import { PauseGuard } from './pauseGuard';
+import { type ChainReader as ChainStatusReader, createStellarChainReader } from './stellar/chain-status';
 import { ERRORS, PROBLEM_TYPE_BASE, isErrorKey } from './errors';
 import { validate } from './validation/middleware';
 import {
@@ -340,6 +341,8 @@ export type AppDeps = {
   registry?: Registry;
   /** On-chain pause check (operator override + cached Soroban `is_paused`). */
   pauseGuard?: PauseGuard;
+  /** Live contract status for GET /api/v1/chain; defaults to the cached Soroban RPC reader. */
+  chainStatusReader?: ChainStatusReader;
 };
 
 /**
@@ -399,6 +402,8 @@ export function createApp(
   const deps: AppDeps = isDeps ? ((storeOrOpts as AppDeps | undefined) ?? {}) : {};
   const auth = resolveAuth(deps);
   const pauseGuard = deps.pauseGuard ?? new PauseGuard();
+  let chainStatusReader = deps.chainStatusReader;
+  const chainStatus = () => (chainStatusReader ??= createStellarChainReader());
   /** 503 for mutations whose Soroban counterparts call require_not_paused. */
   const requireNotPaused = async (_req: Request, res: Response, next: NextFunction) => {
     try {
@@ -703,8 +708,11 @@ export function createApp(
 
   v1.get(
     '/chain',
-    wrap(async () => {
-      const pause = await pauseGuard.isPaused();
+    wrap(async (req) => {
+      const [pause, onChain] = await Promise.all([
+        pauseGuard.isPaused(),
+        chainStatus().getStatus({ refresh: req.query.refresh === 'true' }),
+      ]);
       return {
         network: config.network,
         rpcUrl: config.rpcUrl,
@@ -712,6 +720,7 @@ export function createApp(
         explorer: explorerUrl(),
         paused: pause.paused,
         pauseSource: pause.source,
+        onChain,
       };
     }),
   );

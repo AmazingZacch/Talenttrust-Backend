@@ -450,8 +450,23 @@ const spec = {
     '/api/v1/chain': {
       get: {
         tags: ['System'],
-        summary: 'On-chain escrow contract deployment info',
-        responses: ok('Deployment', {
+        summary: 'On-chain escrow contract deployment info with live contract status',
+        description:
+          'Static deployment info, the pause guard state, and `onChain`, a cached snapshot read from the Soroban RPC ' +
+          '(contract version, paused flag, escrow count, admin, latest ledger). The endpoint always returns 200; when ' +
+          'the RPC is unreachable, `onChain.reachable` is false and `onChain.error` explains why. If a previous snapshot ' +
+          'exists it is served with `onChain.stale` true. Results are cached for CHAIN_STATUS_TTL_MS (15s); ' +
+          '`refresh=true` bypasses the cache at most once per CHAIN_REFRESH_MIN_INTERVAL_MS (5s).',
+        parameters: [
+          {
+            name: 'refresh',
+            in: 'query',
+            required: false,
+            schema: { type: 'string', enum: ['true'] },
+            description: 'Bypass the cache and re-read the contract (rate-limited).',
+          },
+        ],
+        responses: ok('Deployment and live on-chain status', {
           type: 'object',
           properties: {
             network: { type: 'string' },
@@ -460,6 +475,7 @@ const spec = {
             explorer: { type: 'string' },
             paused: { type: 'boolean' },
             pauseSource: { type: 'string', enum: ['chain', 'env', 'none'] },
+            onChain: { $ref: '#/components/schemas/OnChainStatus' },
           },
         }),
       },
@@ -926,6 +942,22 @@ const spec = {
       },
     },
     schemas: {
+      OnChainStatus: {
+        type: 'object',
+        description: 'Live escrow contract state read from the Soroban RPC (cached, degrades gracefully).',
+        required: ['reachable', 'fetchedAt', 'stale'],
+        properties: {
+          reachable: { type: 'boolean', description: 'False when the RPC could not be reached and no cached snapshot exists.' },
+          latestLedger: { type: 'integer', description: 'Latest ledger seen at fetch time.' },
+          version: { type: 'string', description: 'Contract version() return value.' },
+          paused: { type: 'boolean', description: 'Contract is_paused() return value.' },
+          contractCount: { type: 'integer', description: 'Contract contract_count() return value.' },
+          admin: { type: 'string', description: 'Contract get_admin() return value.' },
+          fetchedAt: { type: 'string', format: 'date-time' },
+          stale: { type: 'boolean', description: 'True when serving the last good snapshot after an RPC failure.' },
+          error: { type: 'string', description: 'Sanitised error summary when the last RPC read failed.' },
+        },
+      },
       Template: {
         type: 'object',
         properties: {
