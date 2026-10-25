@@ -85,6 +85,13 @@ export const ERRORS = {
   challenge_replayed: { status: 401, title: 'Challenge replayed', detail: 'Challenge has already been used' },
   invalid_signature: { status: 401, title: 'Invalid signature', detail: 'Signature is missing or does not verify' },
   cron_unauthorized: { status: 401, title: 'Cron unauthorized', detail: 'Valid bearer authorization is required' },
+  // Admin dispute queue
+  admin_not_configured: { status: 404, title: 'Admin not configured', detail: 'Admin endpoints are disabled until ADMIN_READ_TOKEN is set' },
+  dispute_not_found: { status: 404, title: 'Dispute not found', detail: 'The contract has never had a dispute' },
+  invalid_status: { status: 400, title: 'Invalid status filter', detail: "status must be one of 'open', 'resolved', 'all'" },
+  invalid_sort: { status: 400, title: 'Invalid sort', detail: "sort must be one of 'oldest', 'newest', 'value'" },
+  invalid_overdue: { status: 400, title: 'Invalid overdue filter', detail: "overdue must be 'true' or 'false'" },
+  invalid_limit: { status: 400, title: 'Invalid limit', detail: 'limit must be an integer between 1 and 100' },
   // On-chain pause
   contract_paused: {
     status: 503,

@@ -161,8 +161,53 @@ const spec = {
     { name: 'Transaction' },
     { name: 'Receipts' },
     { name: 'Cron' },
+    { name: 'Disputes', description: 'Admin dispute queue. Requires the ADMIN_READ_TOKEN bearer token.' },
   ],
   paths: {
+    '/api/v1/disputes': {
+      get: {
+        tags: ['Disputes'],
+        summary: 'List the admin dispute queue',
+        security: [{ adminToken: [] }],
+        description:
+          'Returns paginated dispute views plus queue-wide summary totals. The summary always ' +
+          'covers ALL disputes in the store (open = contracts currently Disputed, overdue = open disputes ' +
+          'past their SLA deadline, totalHeld = escrow held across open disputes), regardless of the filters. ' +
+          'Dispute reasons are only exposed here and on /api/v1/disputes/{contractId}.',
+        parameters: [
+          { name: 'status', in: 'query', schema: { type: 'string', enum: ['open', 'resolved', 'all'], default: 'all' } },
+          {
+            name: 'sort',
+            in: 'query',
+            schema: { type: 'string', enum: ['oldest', 'newest', 'value'], default: 'oldest' },
+            description: 'oldest/newest: by openedAt; value: by held amount descending (ties broken by contractId)',
+          },
+          { name: 'overdue', in: 'query', schema: { type: 'boolean' }, description: 'Only open disputes past their SLA deadline' },
+          { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 } },
+          { name: 'cursor', in: 'query', schema: { type: 'string' }, description: 'page.nextCursor of a previous request with the same sort' },
+        ],
+        responses: {
+          ...ok('Dispute queue page', { $ref: '#/components/schemas/DisputeQueue' }),
+          400: errorResponse('Invalid status, sort, overdue, limit, or cursor'),
+          401: errorResponse('Missing or invalid admin bearer token'),
+          404: errorResponse('ADMIN_READ_TOKEN is not configured (admin_not_configured)'),
+        },
+      },
+    },
+    '/api/v1/disputes/{contractId}': {
+      get: {
+        tags: ['Disputes'],
+        summary: 'Get the dispute view for a contract',
+        security: [{ adminToken: [] }],
+        parameters: [{ name: 'contractId', in: 'path', required: true, schema: { type: 'integer' } }],
+        responses: {
+          ...ok('Dispute view', { $ref: '#/components/schemas/DisputeView' }),
+          400: errorResponse('contractId must be a positive integer'),
+          401: errorResponse('Missing or invalid admin bearer token'),
+          404: errorResponse('Contract has never had a dispute (dispute_not_found), or ADMIN_READ_TOKEN is not configured'),
+        },
+      },
+    },
     '/api/v1/errors': {
       get: {
         tags: ['System'],
@@ -687,6 +732,7 @@ const spec = {
   },
   components: {
     securitySchemes: {
+      adminToken: { type: 'http', scheme: 'bearer', description: 'Static ADMIN_READ_TOKEN value' },
       metricsToken: { type: 'http', scheme: 'bearer', description: 'Bearer token: METRICS_TOKEN' },
       bearerAuth: {
         type: 'http',
@@ -726,6 +772,42 @@ const spec = {
       },
     },
     schemas: {
+      DisputeView: {
+        type: 'object',
+        required: ['contractId', 'title', 'client', 'freelancer', 'raisedBy', 'raisedByRole', 'reason', 'openedAt', 'ageHours', 'held', 'heldUnits', 'slaDeadline', 'overdue'],
+        properties: {
+          contractId: { type: 'integer' },
+          title: { type: 'string' },
+          client: { type: 'string' },
+          freelancer: { type: 'string' },
+          raisedBy: { type: 'string', description: 'Address that opened the dispute' },
+          raisedByRole: { type: 'string', enum: ['client', 'freelancer'] },
+          reason: { type: 'string', description: 'Dispute reason; only exposed on the admin routes' },
+          openedAt: { type: 'string', format: 'date-time' },
+          ageHours: { type: 'number', description: 'Hours since openedAt at the time of the request' },
+          held: { type: 'number', description: 'DEPRECATED — lossy above 2^53. Use heldUnits.' },
+          heldUnits: { type: 'string', description: 'Escrow held while the dispute is open (base units); 0 once resolved' },
+          slaDeadline: { type: 'string', format: 'date-time', description: 'openedAt + DISPUTE_SLA_HOURS' },
+          overdue: { type: 'boolean', description: 'True only while open and strictly past slaDeadline' },
+          resolvedAt: { type: 'string', format: 'date-time' },
+          freelancerBps: { type: 'integer', minimum: 0, maximum: 10000 },
+        },
+      },
+      DisputeQueue: {
+        type: 'object',
+        properties: {
+          data: { type: 'array', items: { $ref: '#/components/schemas/DisputeView' } },
+          summary: {
+            type: 'object',
+            description: 'Queue-wide totals across ALL disputes, ignoring query filters',
+            properties: { open: { type: 'integer' }, overdue: { type: 'integer' }, totalHeld: { type: 'number' } },
+          },
+          page: {
+            type: 'object',
+            properties: { limit: { type: 'integer' }, count: { type: 'integer' }, nextCursor: { type: 'string', nullable: true } },
+          },
+        },
+      },
       Problem: {
         type: 'object',
         description: 'RFC 9457 problem details. `error`/`message` duplicate the code/detail for older clients.',

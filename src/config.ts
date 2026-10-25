@@ -1,3 +1,5 @@
+const slaRaw = Number(process.env.DISPUTE_SLA_HOURS);
+
 export const config = {
   network: process.env.STELLAR_NETWORK || 'testnet',
   contractId:
@@ -5,6 +7,7 @@ export const config = {
   rpcUrl: process.env.STELLAR_RPC_URL || 'https://soroban-testnet.stellar.org',
   txTimeoutSeconds: Math.max(1, Number.parseInt(process.env.TX_TIMEOUT_SECONDS || '300', 10) || 300),
   frontendUrl: process.env.FRONTEND_URL || 'https://talenttrust-frontend.vercel.app',
+  disputeSlaHours: Number.isFinite(slaRaw) && slaRaw > 0 ? slaRaw : 72,
   version: '1.0.0',
   requireIfMatch: process.env.REQUIRE_IF_MATCH === 'true',
   apiPaused: process.env.API_PAUSED === 'true',

@@ -3,7 +3,19 @@ import cors from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
 import { config, explorerUrl } from './config';
-import { EscrowStore, HttpError, LIST_STATUSES, type Cursor, type EscrowContract, type QueryFilters } from './store';
+import {
+  DEFAULT_DISPUTE_LIMIT,
+  EscrowStore,
+  HttpError,
+  LIST_STATUSES,
+  MAX_DISPUTE_LIMIT,
+  publicContract,
+  type Cursor,
+  type DisputeSort,
+  type DisputeStatusFilter,
+  type EscrowContract,
+  type QueryFilters,
+} from './store';
 import { openapi, docsHtml } from './openapi';
 import { PauseGuard } from './pauseGuard';
 import { ERRORS, PROBLEM_TYPE_BASE, isErrorKey } from './errors';
@@ -79,6 +91,60 @@ function parseFields(req: Request) {
   const raw = req.query.fields;
   if (typeof raw !== 'string') return null;
   return parseFieldSpec(raw);
+}
+
+/** Admin read auth for the dispute queue: 404 when ADMIN_READ_TOKEN is unset, 401 on a bad token. */
+function requireAdminRead(req: Request, _res: Response, next: NextFunction) {
+  const expected = process.env.ADMIN_READ_TOKEN;
+  if (!expected) return next(new HttpError(404, 'admin_not_configured', 'Admin endpoints are not configured'));
+  const auth = req.headers.authorization;
+  const token = auth?.startsWith('Bearer ') ? auth.slice('Bearer '.length) : undefined;
+  const a = Buffer.from(expected);
+  const b = Buffer.from(token ?? '');
+  if (!token || a.length !== b.length || !timingSafeEqual(a, b)) {
+    return next(new HttpError(401, 'unauthorized', 'Missing or invalid admin bearer token'));
+  }
+  next();
+}
+
+/** Single-valued string query parameter, or undefined; arrays (repeated params) are rejected. */
+const oneParam = (value: unknown, code: string, name: string): string | undefined => {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string') throw new HttpError(400, code, `${name} must be a single string value`);
+  return value;
+};
+
+function disputeStatus(value: unknown): DisputeStatusFilter {
+  const v = oneParam(value, 'invalid_status', 'status') ?? 'all';
+  if (v !== 'open' && v !== 'resolved' && v !== 'all') {
+    throw new HttpError(400, 'invalid_status', "status must be one of 'open', 'resolved', 'all'");
+  }
+  return v;
+}
+
+function disputeSort(value: unknown): DisputeSort {
+  const v = oneParam(value, 'invalid_sort', 'sort') ?? 'oldest';
+  if (v !== 'oldest' && v !== 'newest' && v !== 'value') {
+    throw new HttpError(400, 'invalid_sort', "sort must be one of 'oldest', 'newest', 'value'");
+  }
+  return v;
+}
+
+function disputeOverdue(value: unknown): boolean {
+  const v = oneParam(value, 'invalid_overdue', 'overdue');
+  if (v === undefined || v === 'false') return false;
+  if (v === 'true') return true;
+  throw new HttpError(400, 'invalid_overdue', "overdue must be 'true' or 'false'");
+}
+
+function disputeLimit(value: unknown): number {
+  const v = oneParam(value, 'invalid_limit', 'limit');
+  if (v === undefined) return DEFAULT_DISPUTE_LIMIT;
+  const n = Number(v);
+  if (!/^[0-9]+$/.test(v) || !Number.isInteger(n) || n < 1 || n > MAX_DISPUTE_LIMIT) {
+    throw new HttpError(400, 'invalid_limit', `limit must be an integer between 1 and ${MAX_DISPUTE_LIMIT}`);
+  }
+  return n;
 }
 
 /** Bearer check for the cron sweep; fails closed (404) when CRON_SECRET is unset. */
@@ -237,8 +303,8 @@ export type AppDeps = {
   authSecret?: string;
   /** Force wallet auth on (true) or off (false) for mutating routes. */
   authRequired?: boolean;
-  /** Injectable clock for auth (tests). */
-  now?: () => number;
+  /** Injectable clock (epoch ms or Date) for auth and the dispute queue (tests). */
+  now?: () => number | Date;
   /** Signs contract-state receipts; defaults to RECEIPT_SIGNING_SECRET or an ephemeral key. */
   receiptManager?: ReceiptManager;
   /** Prometheus registry; each app gets its own unless one is injected. */
@@ -257,7 +323,9 @@ function resolveAuth(deps: AppDeps) {
   const configured = deps.authSecret ?? process.env.AUTH_SECRET;
   const secret = configured || randomBytes(32).toString('base64');
   const required = deps.authRequired ?? (Boolean(configured) || process.env.AUTH_REQUIRED === 'true');
-  return { secret, required, now: deps.now ?? Date.now };
+  const clock = deps.now;
+  const now = clock ? () => { const v = clock(); return typeof v === 'number' ? v : v.getTime(); } : Date.now;
+  return { secret, required, now };
 }
 
 function resolveStoreAndLogger(
@@ -413,7 +481,9 @@ export function createApp(
   /** With `?receipt=true`, attach a `Receipt` header: a JWS over the post-mutation contract state. */
   const maybeAttachReceipt = (req: Request, res: Response, contract: unknown) => {
     if (req.query.receipt === 'true' && contract && typeof contract === 'object') {
-      res.setHeader('Receipt', receiptManager().issueReceipt(contract as Record<string, unknown>, getOrigin(req)));
+      // Receipts are signed over the public view, so dispute reasons never leave the admin routes.
+      const view = publicContract(contract as { dispute?: EscrowContract['dispute'] });
+      res.setHeader('Receipt', receiptManager().issueReceipt(view as Record<string, unknown>, getOrigin(req)));
     }
   };
 
@@ -459,6 +529,8 @@ export function createApp(
         'GET  /api/v1/contracts/:id/parity',
         'GET  /api/v1/reputation/:address',
         'GET  /api/v1/reputation/:address/reviews',
+        'GET  /api/v1/disputes (admin)',
+        'GET  /api/v1/disputes/:contractId (admin)',
         'GET  /api/v1/auth/challenge',
         'POST /api/v1/auth/token',
         'POST /api/v1/receipts/verify',
@@ -618,7 +690,7 @@ export function createApp(
       const qs = req.originalUrl.includes('?') ? req.originalUrl.split('?')[1] : '';
       if (conditionalGet(req, res, getContractsListEtag(result.data, qs))) return undefined;
       return {
-        data: result.data.map((c) => project(c, spec)),
+        data: result.data.map((c) => project(publicContract(c), spec)),
         page: { limit, nextCursor: result.nextCursor ? serializeCursor(result.nextCursor) : null, hasMore: result.hasMore },
       };
     }),
@@ -645,7 +717,7 @@ export function createApp(
       const created = store.create(req.body);
       res.setHeader('ETag', getContractEtag(created));
       maybeAttachReceipt(req, res, created);
-      res.status(201).json(created);
+      res.status(201).json(publicContract(created));
     }),
   );
   v1.get(
@@ -654,14 +726,14 @@ export function createApp(
     wrap((req, res) => {
       const contract = store.get(Number(req.params.id));
       if (conditionalGet(req, res, getContractEtag(contract))) return undefined;
-      return project(contract, parseFields(req));
+      return project(publicContract(contract), parseFields(req));
     }),
   );
   v1.get(
     '/contracts/:id/receipt',
     wrap((req) => {
       const contract = store.get(id(req));
-      return { receipt: receiptManager().issueReceipt(contract as unknown as Record<string, unknown>, getOrigin(req)) };
+      return { receipt: receiptManager().issueReceipt(publicContract(contract) as unknown as Record<string, unknown>, getOrigin(req)) };
     }),
   );
   /** If-Match check for contract mutations: 412 on a stale tag, 428 when REQUIRE_IF_MATCH=true and absent. */
@@ -702,7 +774,7 @@ export function createApp(
     wrap((req, res) => {
       const updated = store.edit(id(req), { ...(req.body ?? {}), client: clientOf(req) });
       setEtag(res, updated);
-      return updated;
+      return publicContract(updated);
     }),
   );
   v1.delete(
@@ -722,7 +794,7 @@ export function createApp(
     wrap((req, res) => {
       const updated = store.extendDeadline(id(req), clientOf(req), req.body?.fundingDeadline);
       setEtag(res, updated);
-      return updated;
+      return publicContract(updated);
     }),
   );
   v1.post(
@@ -735,7 +807,7 @@ export function createApp(
       const updated = store.deposit(Number(req.params.id), req.body.amount, callerOf(req));
       setEtag(res, updated);
       maybeAttachReceipt(req, res, updated);
-      return updated;
+      return publicContract(updated);
     }),
   );
   v1.post(
@@ -748,7 +820,7 @@ export function createApp(
       const updated = store.release(Number(req.params.id), Number(req.params.index), callerOf(req));
       setEtag(res, updated);
       maybeAttachReceipt(req, res, updated);
-      return updated;
+      return publicContract(updated);
     }),
   );
   v1.post(
@@ -761,7 +833,7 @@ export function createApp(
       const updated = store.openDispute(Number(req.params.id), req.body.raisedBy, req.body.reason, callerOf(req));
       setEtag(res, updated);
       maybeAttachReceipt(req, res, updated);
-      return updated;
+      return publicContract(updated);
     }),
   );
   v1.post(
@@ -772,7 +844,7 @@ export function createApp(
       const updated = store.resolveDispute(Number(req.params.id), req.body.freelancerBps);
       setEtag(res, updated);
       maybeAttachReceipt(req, res, updated);
-      return updated;
+      return publicContract(updated);
     }),
   );
   v1.post(
@@ -785,7 +857,7 @@ export function createApp(
       const updated = store.cancel(Number(req.params.id), callerOf(req));
       setEtag(res, updated);
       maybeAttachReceipt(req, res, updated);
-      return updated;
+      return publicContract(updated);
     }),
   );
   v1.post(
@@ -821,7 +893,7 @@ export function createApp(
   );
   v1.post(
     '/contracts/:id/link',
-    wrap(async (req) => store.linkEscrow(id(req), req.body?.escrowId, chainReader)),
+    wrap(async (req) => publicContract(await store.linkEscrow(id(req), req.body?.escrowId, chainReader))),
   );
   v1.get(
     '/contracts/:id/parity',
@@ -861,7 +933,7 @@ export function createApp(
       let matchesCurrent = false;
       if (verified.contractId) {
         try {
-          matchesCurrent = hashContractState(store.get(verified.contractId)) === verified.contractHash;
+          matchesCurrent = hashContractState(publicContract(store.get(verified.contractId))) === verified.contractHash;
         } catch {
           matchesCurrent = false;
         }
@@ -870,6 +942,34 @@ export function createApp(
     }),
   );
 
+  // --- Admin dispute queue (ADMIN_READ_TOKEN) ---
+  const disputeNow = () => new Date(store.currentTime());
+  v1.get(
+    '/disputes',
+    requireAdminRead,
+    wrap((req) =>
+      store.listDisputes({
+        status: disputeStatus(req.query.status),
+        sort: disputeSort(req.query.sort),
+        overdueOnly: disputeOverdue(req.query.overdue),
+        limit: disputeLimit(req.query.limit),
+        cursor: oneParam(req.query.cursor, 'invalid_cursor', 'cursor'),
+        now: disputeNow(),
+        slaHours: config.disputeSlaHours,
+      }),
+    ),
+  );
+  v1.get(
+    '/disputes/:contractId',
+    requireAdminRead,
+    wrap((req) => {
+      const n = Number(req.params.contractId);
+      if (!/^[0-9]+$/.test(req.params.contractId) || !Number.isInteger(n) || n < 1) {
+        throw new HttpError(400, 'invalid_id', 'contractId must be a positive integer');
+      }
+      return store.getDispute(n, disputeNow(), config.disputeSlaHours);
+    }),
+  );
   app.use('/api/v1', v1);
 
   // Daily Vercel cron (see vercel.json); also callable manually with the bearer secret.
