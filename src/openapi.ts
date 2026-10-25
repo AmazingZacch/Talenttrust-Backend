@@ -694,6 +694,15 @@ const spec = {
       },
     },
     schemas: {
+      PreconditionFailedResponse: {
+        type: 'object',
+        required: ['error', 'message', 'currentVersion'],
+        properties: {
+          error: { type: 'string', enum: ['precondition_failed'] },
+          message: { type: 'string' },
+          currentVersion: { type: 'integer' },
+        },
+      },
       ChallengeResponse: {
         type: 'object',
         required: ['address', 'challenge', 'expiresAt'],
@@ -901,6 +910,7 @@ const spec = {
           },
           chain: { $ref: '#/components/schemas/ChainInfo' },
           revision: { type: 'integer', minimum: 1, description: 'Term revision; increments on every edit.' },
+          version: { type: 'integer', minimum: 1, description: 'Entity version behind the ETag; increments on every state change.' },
           createdAt: { type: 'string', format: 'date-time' },
           updatedAt: { type: 'string', format: 'date-time' },
         },
@@ -1221,7 +1231,70 @@ function withReceipts<T extends { paths: object }>(doc: T): T {
   return doc;
 }
 
-export const openapi = withBearerAuth(withIdempotency(withReceipts(spec)));
+const etagHeader = {
+  ETag: { description: 'Strong entity tag (`"<id>-<version>"` for a contract)', schema: { type: 'string' } },
+};
+const ifNoneMatchHeader = {
+  name: 'If-None-Match',
+  in: 'header',
+  required: false,
+  description: 'Entity tag(s) from a previous response; returns 304 Not Modified when current',
+  schema: { type: 'string' },
+};
+const ifMatchHeader = {
+  name: 'If-Match',
+  in: 'header',
+  required: false,
+  description:
+    'Current entity tag (`"<id>-<version>"` or `*`) for optimistic concurrency. Required when the server runs ' +
+    'with REQUIRE_IF_MATCH=true.',
+  schema: { type: 'string' },
+};
+
+/** Documents ETag/If-None-Match on contract reads and If-Match (412/428) on contract mutations. */
+function withEtags<T extends { paths: object }>(doc: T): T {
+  const paths = doc.paths as Record<string, Record<string, Operation | undefined>>;
+  for (const path of ['/api/v1/contracts', '/api/v1/contracts/{id}']) {
+    const op = paths[path]?.get;
+    if (!op) continue;
+    op.parameters = [...(op.parameters ?? []), ifNoneMatchHeader];
+    const r = op.responses['200'] as { headers?: object } | undefined;
+    if (r) r.headers = { ...(r.headers ?? {}), ...etagHeader };
+    op.responses = { ...op.responses, 304: { description: 'Not Modified - cached representation is current' } };
+  }
+  const mutations: Array<[string, string]> = [
+    ['/api/v1/contracts/{id}', 'patch'],
+    ['/api/v1/contracts/{id}', 'delete'],
+    ['/api/v1/contracts/{id}/extend-deadline', 'post'],
+    ['/api/v1/contracts/{id}/deposit', 'post'],
+    ['/api/v1/contracts/{id}/milestones/{index}/release', 'post'],
+    ['/api/v1/contracts/{id}/dispute', 'post'],
+    ['/api/v1/contracts/{id}/resolve', 'post'],
+    ['/api/v1/contracts/{id}/cancel', 'post'],
+    ['/api/v1/contracts/{id}/reputation', 'post'],
+  ];
+  for (const [path, method] of mutations) {
+    const op = paths[path]?.[method];
+    if (!op) continue;
+    op.parameters = [...(op.parameters ?? []), ifMatchHeader];
+    const r = op.responses['200'] as { $ref?: string; headers?: object } | undefined;
+    if (r && !r.$ref) r.headers = { ...(r.headers ?? {}), ...etagHeader };
+    op.responses = {
+      ...op.responses,
+      412: {
+        description: 'Precondition Failed - If-Match does not match the current ETag',
+        headers: etagHeader,
+        content: json({ $ref: '#/components/schemas/PreconditionFailedResponse' }),
+      },
+      428: errorResponse('Precondition Required - If-Match missing while REQUIRE_IF_MATCH=true'),
+    };
+  }
+  const created = (paths['/api/v1/contracts']?.post?.responses['201'] ?? undefined) as { headers?: object } | undefined;
+  if (created) created.headers = { ...(created.headers ?? {}), ...etagHeader };
+  return doc;
+}
+
+export const openapi = withEtags(withBearerAuth(withIdempotency(withReceipts(spec))));
 
 export const docsHtml = `<!doctype html>
 <html lang="en">

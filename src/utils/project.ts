@@ -24,6 +24,7 @@ export const ALLOWED_FIELDS: readonly string[] = [
   'dispute',
   'chain',
   'revision',
+  'version',
   'createdAt',
   'updatedAt',
   'fundingDeadline',

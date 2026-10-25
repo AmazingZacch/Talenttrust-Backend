@@ -18,6 +18,8 @@ data is per-instance and resets on redeploy.
 
 ## Endpoints
 
+All `GET` endpoints for contracts return strong `ETag` and `Cache-Control: no-cache` headers and support `If-None-Match` conditional requests (returning `304 Not Modified` when matched). All `POST /api/v1/contracts/:id/*` mutation endpoints support `If-Match` for optimistic concurrency control (returning `412 Precondition Failed` on mismatch and `428 Precondition Required` when mandatory).
+
 | Method | Path | Description |
 | --- | --- | --- |
 | GET | `/` | Service info and endpoint list (JSON) |
@@ -143,7 +145,7 @@ npm run build && npm start
 
 Configuration (all optional, see `.env.example`): `PORT`, `LOG_LEVEL` (debug|info|warn|error|silent, default info; silent in tests),
 `METRICS_TOKEN` (protects `GET /metrics`; when unset the endpoint is disabled),
-`CURSOR_SECRET` (signs contract-list cursors; random per-process default),
+`CURSOR_SECRET` (signs contract-list cursors; random per-process default), `REQUIRE_IF_MATCH` (`true` makes `If-Match` mandatory on contract mutations),
 `ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`, `STELLAR_RPC_URL`, `STELLAR_NETWORK_PASSPHRASE`, `TX_TIMEOUT_SECONDS`, `FRONTEND_URL`, `IDEMPOTENCY_REQUIRED`, `AUTH_SECRET`, `AUTH_REQUIRED`,
 `RECEIPT_SIGNING_SECRET` (Stellar `S...` ed25519 seed), and `CRON_SECRET` (required to authenticate
 `GET`/`POST /api/cron/expire-contracts`). New contracts default to a funding deadline 14 days after

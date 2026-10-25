@@ -3,7 +3,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
 import { config, explorerUrl } from './config';
-import { EscrowStore, HttpError, LIST_STATUSES, type Cursor, type QueryFilters } from './store';
+import { EscrowStore, HttpError, LIST_STATUSES, type Cursor, type EscrowContract, type QueryFilters } from './store';
 import { openapi, docsHtml } from './openapi';
 import { validate } from './validation/middleware';
 import {
@@ -94,6 +94,54 @@ const requireCronSecret = (req: Request) => {
 };
 
 const REQUEST_ID_RE = /^[A-Za-z0-9._-]{8,128}$/;
+
+// --- ETag caching and If-Match optimistic concurrency ---
+
+/** Strong entity tag for a contract: `"<id>-<version>"`. */
+export function getContractEtag(contract: { id: number; version: number }): string {
+  return `"${contract.id}-${contract.version}"`;
+}
+
+/** List entity tag: hash of every listed (id, version) pair plus the query string. */
+export function getContractsListEtag(contracts: Array<{ id: number; version: number }>, queryString = ''): string {
+  const pairs = contracts.map((c) => `${c.id}:${c.version}`).join(',');
+  return `"${createHash('sha1').update(`${pairs}?${queryString}`).digest('hex')}"`;
+}
+
+export class PreconditionFailedError extends HttpError {
+  constructor(
+    public currentEtag: string,
+    public currentVersion: number,
+  ) {
+    super(412, 'precondition_failed', 'Precondition failed');
+  }
+}
+
+export class PreconditionRequiredError extends HttpError {
+  constructor() {
+    super(428, 'precondition_required', 'If-Match header is required');
+  }
+}
+
+/** Parse an If-None-Match / If-Match header into opaque tags (weak prefixes stripped). */
+const parseEtagList = (header: string | undefined): string[] =>
+  (header ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((s) => (s.startsWith('W/') ? s.slice(2) : s));
+
+/** Set ETag + Cache-Control and answer 304 when If-None-Match matches. Returns true when handled. */
+function conditionalGet(req: Request, res: Response, etag: string): boolean {
+  res.setHeader('ETag', etag);
+  res.setHeader('Cache-Control', 'no-cache');
+  const tags = parseEtagList(req.headers['if-none-match']);
+  if (tags.includes(etag) || tags.includes('*')) {
+    res.status(304).end();
+    return true;
+  }
+  return false;
+}
 
 // --- Contract list pagination (cursor = base64url JSON + HMAC, so clients cannot forge it) ---
 
@@ -257,6 +305,8 @@ export function createApp(
   const requireAuth = createRequireAuth(auth.secret, auth.now, auth.required);
 
   const app = express();
+  // Strong, version-based ETags are set explicitly on contract routes.
+  app.set('etag', false);
   app.disable('x-powered-by');
   // Correlation id: echo a valid inbound X-Request-Id, otherwise generate one.
   // The regex excludes CR/LF so a client cannot inject log-line terminators.
@@ -493,13 +543,15 @@ export function createApp(
   v1.get(
     '/contracts',
     validate({ query: ListQuery }),
-    wrap((req) => {
+    wrap((req, res) => {
       const limit = parseLimit(req.query.limit);
       const sort = parseSortParam(req.query.sort);
       const after = parseCursorParam(req.query.cursor, sort);
       const filters = parseFilters(req.query);
       const spec = parseFields(req);
       const result = store.query({ filters, sort, limit, after });
+      const qs = req.originalUrl.includes('?') ? req.originalUrl.split('?')[1] : '';
+      if (conditionalGet(req, res, getContractsListEtag(result.data, qs))) return undefined;
       return {
         data: result.data.map((c) => project(c, spec)),
         page: { limit, nextCursor: result.nextCursor ? serializeCursor(result.nextCursor) : null, hasMore: result.hasMore },
@@ -525,6 +577,7 @@ export function createApp(
     validate({ body: CreateContractBody }),
     wrap((req, res) => {
       const created = store.create(req.body);
+      res.setHeader('ETag', getContractEtag(created));
       maybeAttachReceipt(req, res, created);
       res.status(201).json(created);
     }),
@@ -532,7 +585,11 @@ export function createApp(
   v1.get(
     '/contracts/:id',
     validate({ params: IdParam }),
-    wrap((req) => project(store.get(Number(req.params.id)), parseFields(req))),
+    wrap((req, res) => {
+      const contract = store.get(Number(req.params.id));
+      if (conditionalGet(req, res, getContractEtag(contract))) return undefined;
+      return project(contract, parseFields(req));
+    }),
   );
   v1.get(
     '/contracts/:id/receipt',
@@ -541,6 +598,28 @@ export function createApp(
       return { receipt: receiptManager().issueReceipt(contract as unknown as Record<string, unknown>, getOrigin(req)) };
     }),
   );
+  /** If-Match check for contract mutations: 412 on a stale tag, 428 when REQUIRE_IF_MATCH=true and absent. */
+  const checkPreconditions = (req: Request, _res: Response, next: NextFunction) => {
+    try {
+      const contract = store.get(id(req));
+      const ifMatch = req.headers['if-match'];
+      if (!ifMatch) {
+        if (process.env.REQUIRE_IF_MATCH === 'true') throw new PreconditionRequiredError();
+      } else {
+        const current = getContractEtag(contract);
+        const tags = parseEtagList(ifMatch);
+        if (!tags.includes('*') && !tags.includes(current)) {
+          throw new PreconditionFailedError(current, contract.version);
+        }
+      }
+      next();
+    } catch (err) {
+      next(err);
+    }
+  };
+  /** Expose the post-mutation entity tag. */
+  const setEtag = (res: Response, contract: EscrowContract) => res.setHeader('ETag', getContractEtag(contract));
+
   // With wallet auth the authenticated address stands in for body.client.
   const clientOf = (req: Request): unknown => {
     const caller = callerOf(req);
@@ -553,11 +632,17 @@ export function createApp(
   v1.patch(
     '/contracts/:id',
     requireAuth,
-    wrap((req) => store.edit(id(req), { ...(req.body ?? {}), client: clientOf(req) })),
+    checkPreconditions,
+    wrap((req, res) => {
+      const updated = store.edit(id(req), { ...(req.body ?? {}), client: clientOf(req) });
+      setEtag(res, updated);
+      return updated;
+    }),
   );
   v1.delete(
     '/contracts/:id',
     requireAuth,
+    checkPreconditions,
     wrap((req, res) => {
       store.delete(id(req), clientOf(req));
       res.status(204).end();
@@ -567,14 +652,21 @@ export function createApp(
   v1.post(
     '/contracts/:id/extend-deadline',
     requireAuth,
-    wrap((req) => store.extendDeadline(id(req), clientOf(req), req.body?.fundingDeadline)),
+    checkPreconditions,
+    wrap((req, res) => {
+      const updated = store.extendDeadline(id(req), clientOf(req), req.body?.fundingDeadline);
+      setEtag(res, updated);
+      return updated;
+    }),
   );
   v1.post(
     '/contracts/:id/deposit',
     requireAuth,
     validate({ params: IdParam, body: DepositBody }),
+    checkPreconditions,
     wrap((req, res) => {
       const updated = store.deposit(Number(req.params.id), req.body.amount, callerOf(req));
+      setEtag(res, updated);
       maybeAttachReceipt(req, res, updated);
       return updated;
     }),
@@ -583,8 +675,10 @@ export function createApp(
     '/contracts/:id/milestones/:index/release',
     requireAuth,
     validate({ params: MilestoneReleaseParams }),
+    checkPreconditions,
     wrap((req, res) => {
       const updated = store.release(Number(req.params.id), Number(req.params.index), callerOf(req));
+      setEtag(res, updated);
       maybeAttachReceipt(req, res, updated);
       return updated;
     }),
@@ -593,8 +687,10 @@ export function createApp(
     '/contracts/:id/dispute',
     requireAuth,
     validate({ params: IdParam, body: DisputeBody }),
+    checkPreconditions,
     wrap((req, res) => {
       const updated = store.openDispute(Number(req.params.id), req.body.raisedBy, req.body.reason, callerOf(req));
+      setEtag(res, updated);
       maybeAttachReceipt(req, res, updated);
       return updated;
     }),
@@ -602,8 +698,10 @@ export function createApp(
   v1.post(
     '/contracts/:id/resolve',
     validate({ params: IdParam, body: ResolveBody }),
+    checkPreconditions,
     wrap((req, res) => {
       const updated = store.resolveDispute(Number(req.params.id), req.body.freelancerBps);
+      setEtag(res, updated);
       maybeAttachReceipt(req, res, updated);
       return updated;
     }),
@@ -612,8 +710,10 @@ export function createApp(
     '/contracts/:id/cancel',
     requireAuth,
     validate({ params: IdParam, body: CancelBody }),
+    checkPreconditions,
     wrap((req, res) => {
       const updated = store.cancel(Number(req.params.id), callerOf(req));
+      setEtag(res, updated);
       maybeAttachReceipt(req, res, updated);
       return updated;
     }),
@@ -622,10 +722,13 @@ export function createApp(
     '/contracts/:id/reputation',
     requireAuth,
     validate({ params: IdParam, body: RateBody }),
+    checkPreconditions,
     wrap((req, res) => {
       const reputation = store.rate(Number(req.params.id), req.body.rating, callerOf(req));
-      // The receipt covers the contract (now reputationIssued), not the reputation summary.
-      maybeAttachReceipt(req, res, store.get(Number(req.params.id)));
+      // The ETag and receipt cover the contract (now reputationIssued), not the reputation summary.
+      const contract = store.get(Number(req.params.id));
+      setEtag(res, contract);
+      maybeAttachReceipt(req, res, contract);
       return reputation;
     }),
   );
@@ -737,6 +840,15 @@ export function createApp(
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
     const requestId = req.id;
+    if (err instanceof PreconditionFailedError) {
+      res.setHeader('ETag', err.currentEtag);
+      res.status(412).json({ error: err.code, message: err.message, currentVersion: err.currentVersion });
+      return;
+    }
+    if (err instanceof PreconditionRequiredError) {
+      res.status(428).json({ error: err.code, message: err.message });
+      return;
+    }
     if (err instanceof HttpError) {
       res.status(err.status).json({ error: err.code, message: err.message, ...err.details, requestId });
       return;

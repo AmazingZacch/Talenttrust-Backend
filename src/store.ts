@@ -106,6 +106,8 @@ export interface EscrowContract {
   chain?: ChainInfo;
   /** Term revision number; starts at 1 and increments on every edit. */
   revision: number;
+  /** Entity version for ETag / If-Match; starts at 1 and increments on every state change. */
+  version: number;
   createdAt: string;
   updatedAt: string;
   /** Contracts still `Created` (not fully funded) at this instant expire. */
@@ -166,6 +168,7 @@ interface InternalContract {
   chain?: ChainInfo;
   revision: number;
   revisions: ContractRevision[];
+  version: number;
   createdAt: string;
   updatedAt: string;
   fundingDeadline: string;
@@ -269,6 +272,7 @@ function toPublic(c: InternalContract): EscrowContract {
     dispute: c.dispute,
     chain: c.chain,
     revision: c.revision,
+    version: c.version,
     createdAt: c.createdAt,
     updatedAt: c.updatedAt,
     fundingDeadline: c.fundingDeadline,
@@ -342,6 +346,7 @@ export class EscrowStore {
       c.refundableAmount = held > 0n ? held : 0n;
       c.fundedAmount = c.releasedAmount;
       c.updatedAt = now.toISOString();
+      c.version += 1;
     }
     return c;
   }
@@ -428,6 +433,7 @@ export class EscrowStore {
       status: 'Created',
       reputationIssued: false,
       revision: 1,
+      version: 1,
       revisions: [],
       createdAt: now,
       updatedAt: now,
@@ -482,6 +488,7 @@ export class EscrowStore {
     c.revisions.push({ revision: c.revision, at, changes });
     if (c.revisions.length > MAX_REVISIONS) c.revisions.shift();
     c.updatedAt = at;
+    c.version += 1;
     return toPublic(c);
   }
 
@@ -520,7 +527,9 @@ export class EscrowStore {
     }
   }
 
+  /** Single point that records a successful state change: bumps `version` and `updatedAt`. */
   private touch(c: InternalContract): EscrowContract {
+    c.version += 1;
     c.updatedAt = this.nowIso();
     return toPublic(c);
   }

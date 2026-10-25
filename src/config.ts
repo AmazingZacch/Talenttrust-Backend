@@ -6,6 +6,7 @@ export const config = {
   txTimeoutSeconds: Math.max(1, Number.parseInt(process.env.TX_TIMEOUT_SECONDS || '300', 10) || 300),
   frontendUrl: process.env.FRONTEND_URL || 'https://talenttrust-frontend.vercel.app',
   version: '1.0.0',
+  requireIfMatch: process.env.REQUIRE_IF_MATCH === 'true',
 };
 
 export const explorerUrl = (id: string = config.contractId) =>
