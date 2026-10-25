@@ -103,6 +103,8 @@ export interface Dispute {
   openedAt: string;
   freelancerBps?: number;
   resolvedAt?: string;
+  /** API key id that resolved the dispute (when scoped API keys are configured). */
+  resolvedBy?: string;
 }
 
 export interface DriftItem {
@@ -927,7 +929,8 @@ export class EscrowStore {
     return this.touch(c);
   }
 
-  resolveDispute(id: number, freelancerBpsRaw: unknown): EscrowContract {
+  /** `resolvedBy` is the id of the scoped API key that authorised the resolution, if any. */
+  resolveDispute(id: number, freelancerBpsRaw: unknown, resolvedBy?: string): EscrowContract {
     const c = this.getInternal(id);
     if (c.status !== 'Disputed') {
       throw new HttpError('contract_not_disputed', 'Only disputed contracts can be resolved');
@@ -947,6 +950,7 @@ export class EscrowStore {
     if (c.dispute) {
       c.dispute.freelancerBps = bps;
       c.dispute.resolvedAt = this.nowIso();
+      if (resolvedBy !== undefined) c.dispute.resolvedBy = resolvedBy;
     }
     return this.touch(c);
   }

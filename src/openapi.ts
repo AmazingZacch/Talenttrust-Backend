@@ -526,6 +526,21 @@ const spec = {
         },
       },
     },
+    '/api/v1/auth/whoami': {
+      get: {
+        tags: ['Auth'],
+        summary: 'Show the scoped API key in use (id and scopes)',
+        security: [{ apiKey: [] }],
+        responses: {
+          ...ok('Key id and scopes', {
+            type: 'object',
+            required: ['keyId', 'scopes'],
+            properties: { keyId: { type: 'string' }, scopes: { type: 'array', items: { type: 'string' } } },
+          }),
+          401: errorResponse('Missing or invalid API key'),
+        },
+      },
+    },
     '/api/v1/auth/challenge': {
       get: {
         tags: ['Auth'],
@@ -951,11 +966,20 @@ const spec = {
     },
     '/api/v1/contracts/{id}/resolve': {
       post: {
+        security: [{ apiKey: [] }],
+        description:
+          'Requires a scoped API key with `disputes:resolve` whenever API_KEYS is configured (fails closed in ' +
+          'production without API_KEYS). 401 without/with an invalid key, 403 `insufficient_scope` otherwise.',
         tags: ['Contracts'],
         summary: 'Resolve a dispute',
         parameters: [idParam],
         requestBody: { required: true, content: json({ $ref: '#/components/schemas/ResolveRequest' }) },
-        responses: { 200: { description: 'Updated contract', content: json(contractRef) }, ...errorResponses },
+        responses: {
+          200: { description: 'Updated contract', content: json(contractRef) },
+          ...errorResponses,
+          401: errorResponse('Missing or invalid API key'),
+          403: errorResponse('API key lacks the disputes:resolve scope (insufficient_scope)'),
+        },
       },
     },
     '/api/v1/contracts/{id}/cancel': {
@@ -1139,6 +1163,12 @@ const spec = {
   },
   components: {
     securitySchemes: {
+      apiKey: {
+        type: 'apiKey',
+        in: 'header',
+        name: 'X-API-Key',
+        description: 'Scoped API key from API_KEYS (also accepted as `Authorization: ApiKey <key>`)',
+      },
       webhookAdmin: { type: 'http', scheme: 'bearer', description: 'Static WEBHOOK_ADMIN_TOKEN value' },
       adminToken: { type: 'http', scheme: 'bearer', description: 'Static ADMIN_READ_TOKEN value' },
       metricsToken: { type: 'http', scheme: 'bearer', description: 'Bearer token: METRICS_TOKEN' },
@@ -1771,6 +1801,7 @@ const spec = {
           openedAt: { type: 'string', format: 'date-time' },
           freelancerBps: { type: 'integer', minimum: 0, maximum: 10000 },
           resolvedAt: { type: 'string', format: 'date-time' },
+          resolvedBy: { type: 'string', description: 'Id of the scoped API key that resolved the dispute' },
         },
       },
       ServiceInfo: {

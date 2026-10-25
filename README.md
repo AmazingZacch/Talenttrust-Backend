@@ -35,6 +35,7 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | GET | `/api/v1/chain/indexer` | Event indexer status (cursor, last run, last error, lag) |
 | GET/POST | `/api/cron/index-events` | Index a batch of contract events (`Authorization: Bearer $CRON_SECRET`) |
 | GET | `/api/v1/stats` | Aggregate statistics |
+| GET | `/api/v1/auth/whoami` | Id and scopes of the presented scoped API key |
 | GET | `/api/v1/auth/challenge` | Request a sign challenge (`?address=G…`) |
 | POST | `/api/v1/auth/token` | Exchange a signed challenge for a bearer token |
 | POST | `/api/v1/tx/build` | Build a simulated, unsigned Soroban transaction for a wallet to sign `{ "action": "...", "source": "G…", "args": {} }` |
@@ -47,7 +48,7 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | POST | `/api/v1/contracts/:id/extend-deadline` | `{ "client": "G...", "fundingDeadline": "2026-01-15T00:00:00.000Z" }` |
 | POST | `/api/v1/contracts/:id/milestones/:index/release` | Release a milestone |
 | POST | `/api/v1/contracts/:id/dispute` | `{ "raisedBy": "G...", "reason": "..." }` |
-| POST | `/api/v1/contracts/:id/resolve` | `{ "freelancerBps": 5000 }` |
+| POST | `/api/v1/contracts/:id/resolve` | `{ "freelancerBps": 5000 }` — requires a scoped API key with `disputes:resolve` (`X-API-Key`) when `API_KEYS` is set |
 | POST | `/api/v1/contracts/:id/cancel` | Cancel and refund |
 | POST | `/api/v1/contracts/:id/reputation` | Client rates freelancer: `{ "rating": 5 }` (backward-compatible) |
 | POST | `/api/v1/contracts/:id/reviews` | Two-sided review: `{ "reviewer": "G...", "rating": 5, "comment": "..." }` |
@@ -217,6 +218,21 @@ accepted for backwards compatibility but rejected (`403 forbidden`) if it differ
 - `HEAD` is supported for every `GET` route.
 - Unknown paths still return `404 not_found`.
 
+## Scoped API keys
+
+Operator-only routes use hashed, scoped API keys from `API_KEYS`, a JSON array of
+`{ "id": "ops-1", "hash": "sha256:<64 hex>", "scopes": ["disputes:resolve"] }` (scopes: `disputes:resolve`,
+`admin:read`, `contracts:write`). Malformed JSON, unknown scopes, duplicate ids or bad hashes stop the app at
+startup. Send the key as `X-API-Key: <key>` or `Authorization: ApiKey <key>`; it is SHA-256 hashed and compared
+against every configured digest in constant time, and never echoed back.
+
+- `POST /api/v1/contracts/:id/resolve` needs `disputes:resolve` (401 without/with an invalid key, 403
+  `insufficient_scope` with `required`); the key id is stored as `dispute.resolvedBy`. With `NODE_ENV=production`
+  and no `API_KEYS`, resolution fails closed (401); outside production with no keys configured it stays open for
+  local development.
+- `GET /api/v1/auth/whoami` returns `{ keyId, scopes }` for the presented key.
+- `npm run apikey:new -- <id> <scope...>` prints a new `tt__…` key once plus the `API_KEYS` entry to add.
+
 ## Development
 
 ```bash
@@ -232,7 +248,7 @@ Configuration (all optional, see `.env.example`): `PORT`, `LOG_LEVEL` (debug|inf
 `CURSOR_SECRET` (signs contract-list cursors; random per-process default), `REQUIRE_IF_MATCH` (`true` makes `If-Match` mandatory on contract mutations),
 `ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`, `STELLAR_RPC_URL`, `STELLAR_NETWORK_PASSPHRASE`, `TX_TIMEOUT_SECONDS`, `FRONTEND_URL`, `IDEMPOTENCY_REQUIRED`, `AUTH_SECRET`, `AUTH_REQUIRED`,
 `BODY_LIMIT` (maximum request body size, default `100kb`), `CORS_ORIGINS` (extra comma-separated CORS origins), `INDEXER_INTERVAL_MS` (event-indexer poll interval for the long-running server, 0 = off) and
-`INDEXER_START_LEDGER` (first ledger to index; defaults to the RPC retention window), `REPUTATION_PRIOR_WEIGHT` (Bayesian prior weight C, default 5), `RPC_TIMEOUT_MS` (default 4000), `TX_CACHE_MAX` (recent relayed transactions kept, default 200), `CHAIN_READ_TTL_MS` (cache for the
+`INDEXER_START_LEDGER` (first ledger to index; defaults to the RPC retention window), `API_KEYS` (scoped API keys, see below), `REPUTATION_PRIOR_WEIGHT` (Bayesian prior weight C, default 5), `RPC_TIMEOUT_MS` (default 4000), `TX_CACHE_MAX` (recent relayed transactions kept, default 200), `CHAIN_READ_TTL_MS` (cache for the
 `/api/v1/chain/contracts` and `/api/v1/chain/reputation` read-through endpoints, default 5000; identical concurrent
 reads share one simulation and each client may make 60 chain reads per minute), `CHAIN_STATUS_TTL_MS`
 (default 15000), `CHAIN_REFRESH_MIN_INTERVAL_MS` (default 5000),

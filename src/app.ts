@@ -19,6 +19,9 @@ import {
 import { openapi, docsHtml, docsCsp } from './openapi';
 import { allowlist, corsOptionsFor, originGuard } from './cors';
 import { methodNotAllowed, optionsHandler } from './methods';
+import { parseApiKeysConfig, type ParsedApiKeys } from './auth/apiKeysConfig';
+import { authenticateScopedApiKey, requireScope, type ScopedApiKeyRequest } from './auth/scopedApiKeyMiddleware';
+import { SCOPES } from './auth/scopes';
 import { PauseGuard } from './pauseGuard';
 import { TxRelay } from './tx';
 import { InMemoryEventStore } from './indexer/store';
@@ -412,6 +415,8 @@ export type AppDeps = {
   txRelay?: TxRelay;
   /** Read-through client for /api/v1/chain/contracts and /api/v1/chain/reputation. */
   chainReadClient?: ChainReadClient;
+  /** Scoped API keys (defaults to the API_KEYS env var). */
+  apiKeys?: ParsedApiKeys;
 };
 
 /**
@@ -486,6 +491,23 @@ export function createApp(
   const pauseGuard = deps.pauseGuard ?? new PauseGuard();
   let chainStatusReader = deps.chainStatusReader;
   const txRelay = second instanceof TxRelay ? second : (deps.txRelay ?? new TxRelay());
+  // Fail fast on a malformed API_KEYS value.
+  const apiKeys: ParsedApiKeys = deps.apiKeys ?? parseApiKeysConfig(process.env.API_KEYS);
+  /**
+   * Dispute resolution needs a key with `disputes:resolve` once any API key is configured. Production
+   * without API_KEYS fails closed (nobody can resolve); dev/test without keys keeps the open behaviour.
+   */
+  const requireResolveKey = (req: Request, res: Response, next: NextFunction) => {
+    if (apiKeys.keys.length === 0) {
+      if (process.env.NODE_ENV === 'production') {
+        return next(new HttpError(401, 'unauthorized', 'Dispute resolution requires a scoped API key (configure API_KEYS)'));
+      }
+      return next();
+    }
+    authenticateScopedApiKey(apiKeys)(req as ScopedApiKeyRequest, res, (err?: unknown) =>
+      err ? next(err) : requireScope(SCOPES.DISPUTES_RESOLVE)(req as ScopedApiKeyRequest, res, next),
+    );
+  };
   const webhooks = new WebhookManager(store.events);
   let chainReadClient: ChainReadClient | undefined = isChainReadClient(second) ? second : deps.chainReadClient;
   const chainClient = () => (chainReadClient ??= new SorobanChainReadClient());
@@ -714,6 +736,7 @@ export function createApp(
         'GET  /api/v1/audit/verify',
         'GET  /api/v1/disputes (admin)',
         'GET  /api/v1/disputes/:contractId (admin)',
+        'GET  /api/v1/auth/whoami',
         'GET  /api/v1/auth/challenge',
         'POST /api/v1/auth/token',
         'POST /api/v1/receipts/verify',
@@ -909,6 +932,15 @@ export function createApp(
     }),
   );
   v1.get('/chain/indexer', wrap(() => eventIndexer.getState()));
+  // Lets integrators check which scoped API key they are using.
+  v1.get(
+    '/auth/whoami',
+    authenticateScopedApiKey(apiKeys),
+    wrap((req) => {
+      const key = (req as ScopedApiKeyRequest).scopedApiKey!;
+      return { keyId: key.id, scopes: key.scopes };
+    }),
+  );
   v1.get('/stats', wrap(() => store.stats()));
   v1.get(
     '/contracts',
@@ -1081,10 +1113,12 @@ export function createApp(
   v1.post(
     '/contracts/:id/resolve',
     ...jsonObjectBody,
+    requireResolveKey,
     validate({ params: IdParam, body: ResolveBody }),
     checkPreconditions,
     wrap((req, res) => {
-      const updated = audited(req, () => store.resolveDispute(Number(req.params.id), req.body.freelancerBps));
+      const resolvedBy = (req as ScopedApiKeyRequest).scopedApiKey?.id;
+      const updated = audited(req, () => store.resolveDispute(Number(req.params.id), req.body.freelancerBps, resolvedBy));
       setEtag(res, updated);
       maybeAttachReceipt(req, res, updated);
       return publicContract(updated);
