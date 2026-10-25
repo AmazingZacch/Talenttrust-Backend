@@ -512,7 +512,7 @@ export class EscrowStore {
       throw new HttpError(409, 'contract_expired', 'Contract funding deadline has passed');
     }
     if (!ACTIVE.includes(c.status)) {
-      throw new HttpError(409, 'invalid_status', `Contract is ${c.status}`);
+      throw new HttpError('contract_not_active', `Contract is ${c.status}`);
     }
   }
 
@@ -587,7 +587,7 @@ export class EscrowStore {
       }
       raisedBy = caller;
     } else if (raisedBy !== c.client && raisedBy !== c.freelancer) {
-      throw new HttpError(403, 'unauthorized', 'Only the client or freelancer can open a dispute');
+      throw new HttpError('forbidden', 'Only the client or freelancer can open a dispute');
     }
     this.requireActive(c);
     c.status = 'Disputed';
@@ -602,7 +602,7 @@ export class EscrowStore {
   resolveDispute(id: number, freelancerBpsRaw: unknown): EscrowContract {
     const c = this.getInternal(id);
     if (c.status !== 'Disputed') {
-      throw new HttpError(409, 'invalid_status', 'Only disputed contracts can be resolved');
+      throw new HttpError('contract_not_disputed', 'Only disputed contracts can be resolved');
     }
     const bps = Number(freelancerBpsRaw);
     if (!Number.isInteger(bps) || bps < 0 || bps > 10000) {
@@ -677,7 +677,7 @@ export class EscrowStore {
       throw new HttpError(403, 'forbidden', 'Only the client or freelancer can review this contract');
     }
     if (c.status !== 'Completed' && c.status !== 'Resolved') {
-      throw new HttpError(409, 'invalid_status', `Contract is ${c.status}`);
+      throw new HttpError('contract_not_completed', `Contract is ${c.status}`);
     }
     const role: ReviewRole =
       reviewer === c.client ? 'client_to_freelancer' : 'freelancer_to_client';
@@ -716,7 +716,7 @@ export class EscrowStore {
       throw new HttpError(409, 'contract_expired', 'Contract funding deadline has passed');
     }
     if (client !== c.client) {
-      throw new HttpError(403, 'unauthorized', 'Only the client can extend the funding deadline');
+      throw new HttpError('forbidden', 'Only the client can extend the funding deadline');
     }
     const deadline = parseIsoMillis(fundingDeadline);
     const now = this.now().getTime();
@@ -744,7 +744,7 @@ export class EscrowStore {
     const c = this.getInternal(id);
     this.requireClient(c, caller, 'issue reputation');
     if (c.status !== 'Completed') {
-      throw new HttpError(409, 'invalid_status', 'Only completed contracts can issue reputation');
+      throw new HttpError('contract_not_completed', 'Only completed contracts can issue reputation');
     }
     if (c.reputationIssued) {
       throw new HttpError(409, 'reputation_already_issued', 'Reputation already issued for this contract');

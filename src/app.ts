@@ -5,6 +5,7 @@ import compression from 'compression';
 import { config, explorerUrl } from './config';
 import { EscrowStore, HttpError, LIST_STATUSES, type Cursor, type EscrowContract, type QueryFilters } from './store';
 import { openapi, docsHtml } from './openapi';
+import { ERRORS, PROBLEM_TYPE_BASE, isErrorKey } from './errors';
 import { validate } from './validation/middleware';
 import {
   IdParam,
@@ -63,7 +64,7 @@ const wrap = (fn: Handler) => async (req: Request, res: Response, next: NextFunc
 
 const id = (req: Request) => {
   const n = Number(req.params.id);
-  if (!Number.isInteger(n) || n < 1) throw new HttpError(400, 'invalid_id', 'id must be a positive integer');
+  if (!Number.isInteger(n) || n < 1) throw new HttpError('invalid_id');
   return n;
 };
 
@@ -417,6 +418,8 @@ export function createApp(
         'GET  /health',
         'GET  /docs',
         'GET  /openapi.json',
+        'GET  /api/v1/errors',
+        'GET  /errors/:code',
         'GET  /metrics',
         'GET  /.well-known/talenttrust-receipts.json',
         'GET  /api/v1/chain',
@@ -464,6 +467,43 @@ export function createApp(
   });
 
   app.get('/openapi.json', wrap(() => openapi));
+
+  // Error catalog: every code the API can return, with status and title.
+  app.get('/api/v1/errors', (_req, res) => {
+    const catalog: Record<string, { status: number; title: string; detail: string; contractError?: { name: string; code: number } }> = {};
+    for (const [key, entry] of Object.entries(ERRORS)) {
+      catalog[key] = {
+        status: entry.status,
+        title: entry.title,
+        detail: entry.detail,
+        ...('contractError' in entry ? { contractError: entry.contractError } : {}),
+      };
+    }
+    res.json(catalog);
+  });
+
+  // Problem `type` URIs resolve here: HTML for browsers, JSON otherwise.
+  const escapeHtml = (v: string) =>
+    v.replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch] as string);
+  app.get('/errors/:code', (req, res) => {
+    const { code } = req.params;
+    if (!isErrorKey(code)) {
+      res.status(404).json({ error: 'error_code_not_found', message: `Unknown error code: ${code}`, requestId: req.id });
+      return;
+    }
+    const entry = ERRORS[code];
+    if (req.accepts(['json', 'html']) === 'html') {
+      res
+        .type('html')
+        .send(
+          `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(entry.title)}</title></head><body>` +
+            `<h1>${escapeHtml(entry.title)}</h1><p>${escapeHtml(entry.detail)}</p><p>Status: ${entry.status}</p>` +
+            `<p>Code: <code>${escapeHtml(code)}</code></p></body></html>`,
+        );
+      return;
+    }
+    res.json({ code, ...entry, type: `${PROBLEM_TYPE_BASE}/${code}` });
+  });
   app.get(['/docs', '/docs/'], (_req, res) => {
     res.type('html').send(docsHtml);
   });
@@ -833,8 +873,8 @@ export function createApp(
     res.type('text/plain; version=0.0.4').send(registry.exposition());
   });
 
-  app.use((req, res) => {
-    res.status(404).json({ error: 'not_found', message: `No route for ${req.method} ${req.path}`, requestId: req.id, docs: '/docs' });
+  app.use((req, _res, next) => {
+    next(new HttpError('not_found', `No route for ${req.method} ${req.path}`, { docs: '/docs' }));
   });
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -849,8 +889,12 @@ export function createApp(
       res.status(428).json({ error: err.code, message: err.message });
       return;
     }
+    // RFC 9457 problem+json; `error`/`message` stay for existing clients.
+    const sendProblem = (e: HttpError) => {
+      res.status(e.status).type('application/problem+json').json({ ...e.toProblemBody(), requestId });
+    };
     if (err instanceof HttpError) {
-      res.status(err.status).json({ error: err.code, message: err.message, ...err.details, requestId });
+      sendProblem(err);
       return;
     }
     if (err instanceof TxBuildError) {
@@ -865,7 +909,7 @@ export function createApp(
       return;
     }
     if (err && typeof err === 'object' && (err as { type?: string }).type === 'entity.parse.failed') {
-      res.status(400).json({ error: 'invalid_json', message: 'Malformed JSON body', requestId });
+      sendProblem(new HttpError('invalid_json'));
       return;
     }
     logger.error('unhandled_error', {
@@ -876,7 +920,7 @@ export function createApp(
         stack: (err as Error)?.stack,
       },
     });
-    res.status(500).json({ error: 'internal_error', message: 'Unexpected error', requestId });
+    sendProblem(new HttpError('internal_error'));
   });
 
   return app;

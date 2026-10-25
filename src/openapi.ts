@@ -163,6 +163,24 @@ const spec = {
     { name: 'Cron' },
   ],
   paths: {
+    '/api/v1/errors': {
+      get: {
+        tags: ['System'],
+        summary: 'Error catalog: every error code with its HTTP status and title',
+        responses: ok('Catalog keyed by error code', { type: 'object', additionalProperties: { type: 'object' } }),
+      },
+    },
+    '/errors/{code}': {
+      get: {
+        tags: ['System'],
+        summary: 'Describe one error code (problem `type` URI); HTML or JSON by Accept',
+        parameters: [{ name: 'code', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          ...ok('Error description'),
+          404: errorResponse('Unknown error code (error_code_not_found)'),
+        },
+      },
+    },
     '/metrics': {
       get: {
         tags: ['System'],
@@ -694,6 +712,25 @@ const spec = {
       },
     },
     schemas: {
+      Problem: {
+        type: 'object',
+        description: 'RFC 9457 problem details. `error`/`message` duplicate the code/detail for older clients.',
+        required: ['type', 'title', 'status', 'error', 'message'],
+        properties: {
+          type: { type: 'string', format: 'uri', description: 'https://talenttrust-backend.vercel.app/errors/<code>' },
+          title: { type: 'string' },
+          status: { type: 'integer' },
+          detail: { type: 'string' },
+          error: { type: 'string', description: 'Machine-readable code (see GET /api/v1/errors)' },
+          message: { type: 'string' },
+          requestId: { type: 'string' },
+          contractError: {
+            type: 'object',
+            properties: { name: { type: 'string' }, code: { type: 'integer' } },
+            description: 'Matching Soroban contract error, when there is one',
+          },
+        },
+      },
       PreconditionFailedResponse: {
         type: 'object',
         required: ['error', 'message', 'currentVersion'],
@@ -1294,7 +1331,37 @@ function withEtags<T extends { paths: object }>(doc: T): T {
   return doc;
 }
 
-export const openapi = withEtags(withBearerAuth(withIdempotency(withReceipts(spec))));
+const problemContent = { 'application/problem+json': { schema: { $ref: '#/components/schemas/Problem' } } };
+
+/**
+ * Error responses are RFC 9457 problem+json: rewrite every inline 4xx/5xx
+ * response (and the shared component responses) to the Problem schema, and give
+ * every operation at least the generic 500.
+ */
+function withProblems<T extends { paths: object; components: object }>(doc: T): T {
+  const toProblem = (r: { $ref?: string; content?: Record<string, { schema?: object }> }) => {
+    if (r.$ref) return;
+    const schema = r.content?.['application/json']?.schema as { $ref?: string } | undefined;
+    // Keep a more specific error schema (e.g. ChainMismatchError) next to the Problem fields.
+    r.content = schema?.$ref && !/ErrorResponse$/.test(schema.$ref)
+      ? { 'application/problem+json': { schema: { allOf: [{ $ref: '#/components/schemas/Problem' }, schema] } } }
+      : problemContent;
+  };
+  const paths = doc.paths as Record<string, Record<string, Operation>>;
+  for (const item of Object.values(paths)) {
+    for (const op of Object.values(item)) {
+      for (const [code, r] of Object.entries(op.responses)) {
+        if (/^[45]/.test(code)) toProblem(r as Parameters<typeof toProblem>[0]);
+      }
+      if (!op.responses['500']) op.responses = { ...op.responses, 500: { description: 'Unexpected error (internal_error)', content: problemContent } };
+    }
+  }
+  const responses = (doc.components as { responses?: Record<string, Parameters<typeof toProblem>[0]> }).responses ?? {};
+  for (const r of Object.values(responses)) toProblem(r);
+  return doc;
+}
+
+export const openapi = withProblems(withEtags(withBearerAuth(withIdempotency(withReceipts(spec)))));
 
 export const docsHtml = `<!doctype html>
 <html lang="en">
