@@ -50,6 +50,42 @@ export interface QueryFilters {
   linked?: boolean;
 }
 
+export type TemplateMode = 'fixed' | 'percent';
+
+/** Template milestone: a fixed amount (base units) or a share of the budget in basis points. */
+export interface TemplateMilestone {
+  title: string;
+  /** @deprecated lossy above 2^53; use amountUnits */
+  amount?: number;
+  amountUnits?: string;
+  percentBps?: number;
+}
+
+export interface Template {
+  id: number;
+  owner: string;
+  name: string;
+  description?: string;
+  mode: TemplateMode;
+  milestones: TemplateMilestone[];
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface InternalTemplate extends Omit<Template, 'milestones'> {
+  milestones: Array<{ title: string; amount?: bigint; percentBps?: number }>;
+}
+
+const toPublicTemplate = (t: InternalTemplate): Template => ({
+  ...t,
+  milestones: t.milestones.map((m) =>
+    m.amount !== undefined
+      ? { title: m.title, amount: Number(m.amount), amountUnits: m.amount.toString() }
+      : { title: m.title, percentBps: m.percentBps },
+  ),
+});
+
 export interface Milestone {
   index: number;
   title: string;
@@ -109,6 +145,9 @@ export interface EscrowContract {
   revision: number;
   /** Entity version for ETag / If-Match; starts at 1 and increments on every state change. */
   version: number;
+  /** Template the milestones were generated from, if any (and its version at the time). */
+  templateId?: number;
+  templateVersion?: number;
   createdAt: string;
   updatedAt: string;
   /** Contracts still `Created` (not fully funded) at this instant expire. */
@@ -250,6 +289,8 @@ interface InternalContract {
   revision: number;
   revisions: ContractRevision[];
   version: number;
+  templateId?: number;
+  templateVersion?: number;
   createdAt: string;
   updatedAt: string;
   fundingDeadline: string;
@@ -354,6 +395,8 @@ function toPublic(c: InternalContract): EscrowContract {
     chain: c.chain,
     revision: c.revision,
     version: c.version,
+    templateId: c.templateId,
+    templateVersion: c.templateVersion,
     createdAt: c.createdAt,
     updatedAt: c.updatedAt,
     fundingDeadline: c.fundingDeadline,
@@ -370,6 +413,8 @@ export class EscrowStore {
   private reviews: Review[] = [];
   private nextReviewId = 1;
   private nextId = 1;
+  private templates = new Map<number, InternalTemplate>();
+  private nextTemplateId = 1;
 
   private mutationRecorder: MutationRecorder = () => undefined;
   /** Append-only, hash-chained audit log of successful state transitions. */
@@ -555,6 +600,8 @@ export class EscrowStore {
     token?: unknown;
     milestones?: unknown;
     fundingDeadline?: unknown;
+    templateId?: unknown;
+    budget?: unknown;
   }): EscrowContract {
     const { client, freelancer } = input;
     if (typeof client !== 'string' || typeof freelancer !== 'string' || !client || !freelancer) {
@@ -563,7 +610,24 @@ export class EscrowStore {
     if (client === freelancer) {
       throw new HttpError(400, 'invalid_parties', 'client and freelancer must differ');
     }
-    const milestones = parseMilestones(input.milestones);
+    let milestones: InternalContract['milestones'];
+    let template: InternalTemplate | undefined;
+    if (input.templateId !== undefined) {
+      if (input.milestones !== undefined) {
+        throw new HttpError(400, 'invalid_contract', 'Cannot provide both templateId and milestones');
+      }
+      const tid = Number(input.templateId);
+      if (!Number.isInteger(tid) || tid <= 0) {
+        throw new HttpError(400, 'invalid_template', 'templateId must be a positive integer');
+      }
+      template = this.getInternalTemplate(tid);
+      milestones = this.resolveTemplate(template, input.budget);
+    } else {
+      if (input.budget !== undefined) {
+        throw new HttpError(400, 'invalid_budget', 'budget must not be provided when using milestones directly');
+      }
+      milestones = parseMilestones(input.milestones);
+    }
     const totalAmount = sumMilestones(milestones);
 
     const nowDate = this.now();
@@ -587,6 +651,8 @@ export class EscrowStore {
       createdAt: now,
       updatedAt: now,
       fundingDeadline,
+      templateId: template?.id,
+      templateVersion: template?.version,
     };
     this.contracts.set(c.id, c);
     return toPublic(c);
@@ -1174,6 +1240,134 @@ export class EscrowStore {
     const c = this.contracts.get(contractId);
     if (!c || !c.dispute) throw new HttpError(404, 'dispute_not_found', `No dispute for contract ${contractId}`);
     return this.toDisputeRecord(c, now, slaHours).view;
+  }
+
+  // --- Milestone templates ---
+
+  private getInternalTemplate(id: number): InternalTemplate {
+    const t = this.templates.get(id);
+    if (!t) throw new HttpError(404, 'template_not_found', `Template ${id} not found`);
+    return t;
+  }
+
+  private parseTemplateMilestones(mode: unknown, raw: unknown): InternalTemplate['milestones'] {
+    if (mode !== 'fixed' && mode !== 'percent') throw new HttpError(400, 'invalid_mode', "mode must be 'fixed' or 'percent'");
+    if (!Array.isArray(raw) || raw.length === 0) {
+      throw new HttpError(400, 'invalid_milestones', 'milestones must be a non-empty array');
+    }
+    if (raw.length > MAX_MILESTONES) throw new HttpError(400, 'invalid_milestones', `at most ${MAX_MILESTONES} milestones`);
+    const out = raw.map((m: unknown, index: number) => {
+      const r = (m ?? {}) as { title?: unknown; amount?: unknown; percentBps?: unknown };
+      const title = typeof r.title === 'string' && r.title ? r.title : `Milestone ${index + 1}`;
+      if (mode === 'fixed') {
+        if (r.percentBps !== undefined) throw new HttpError(400, 'invalid_milestones', 'fixed mode milestones must not have percentBps');
+        return { title, amount: parseAmount(r.amount, `milestone ${index} amount`) };
+      }
+      if (r.amount !== undefined) throw new HttpError(400, 'invalid_milestones', 'percent mode milestones must not have amount');
+      const bps = r.percentBps;
+      if (typeof bps !== 'number' || !Number.isInteger(bps) || bps <= 0 || bps > 10000) {
+        throw new HttpError(400, 'invalid_percent', `milestone ${index} percentBps must be a positive integer`);
+      }
+      return { title, percentBps: bps };
+    });
+    if (mode === 'percent' && out.reduce((sum, m) => sum + (m.percentBps ?? 0), 0) !== 10000) {
+      throw new HttpError(400, 'invalid_template', 'percentBps must sum to exactly 10000');
+    }
+    return out;
+  }
+
+  /** Expand a template into contract milestones; percent mode floors each share and puts the remainder on the last. */
+  private resolveTemplate(t: InternalTemplate, budgetRaw: unknown): InternalContract['milestones'] {
+    if (t.mode === 'fixed') {
+      if (budgetRaw !== undefined) {
+        throw new HttpError(400, 'invalid_budget', 'budget must not be provided for fixed mode templates');
+      }
+      return t.milestones.map((m, index) => ({ index, title: m.title, amount: m.amount as bigint, released: false }));
+    }
+    if (budgetRaw === undefined) throw new HttpError(400, 'invalid_budget', 'budget is required for percent mode templates');
+    const budget = parseAmount(budgetRaw, 'budget');
+    const milestones = t.milestones.map((m, index) => ({
+      index,
+      title: m.title,
+      amount: (budget * BigInt(m.percentBps ?? 0)) / 10000n,
+      released: false,
+    }));
+    const remainder = budget - milestones.reduce((sum, m) => sum + m.amount, 0n);
+    milestones[milestones.length - 1].amount += remainder;
+    if (milestones.some((m) => m.amount <= 0n)) {
+      throw new HttpError(400, 'invalid_budget', 'budget is too small: every milestone must get a positive amount');
+    }
+    return milestones;
+  }
+
+  listTemplates(filter: { owner?: string } = {}): Template[] {
+    return [...this.templates.values()].filter((t) => !filter.owner || t.owner === filter.owner).map(toPublicTemplate);
+  }
+
+  getTemplate(id: number): Template {
+    return toPublicTemplate(this.getInternalTemplate(id));
+  }
+
+  createTemplate(input: { owner?: unknown; name?: unknown; description?: unknown; mode?: unknown; milestones?: unknown }): Template {
+    const { owner, name, description, mode } = input;
+    if (typeof owner !== 'string' || !owner) throw new HttpError(400, 'invalid_owner', 'owner is required');
+    if (typeof name !== 'string' || !name || name.length > 80) {
+      throw new HttpError(400, 'invalid_name', 'name is required (max 80 characters)');
+    }
+    if (description !== undefined && (typeof description !== 'string' || description.length > 500)) {
+      throw new HttpError(400, 'invalid_description', 'description must be a string (max 500 characters)');
+    }
+    const milestones = this.parseTemplateMilestones(mode, input.milestones);
+    const now = this.nowIso();
+    const t: InternalTemplate = {
+      id: this.nextTemplateId++,
+      owner,
+      name,
+      description: description as string | undefined,
+      mode: mode as TemplateMode,
+      milestones,
+      version: 1,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.templates.set(t.id, t);
+    return toPublicTemplate(t);
+  }
+
+  /** Owner-only; bumps `version`. Contracts already created keep their copied milestones. */
+  updateTemplate(
+    id: number,
+    owner: unknown,
+    input: { name?: unknown; description?: unknown; mode?: unknown; milestones?: unknown },
+  ): Template {
+    const t = this.getInternalTemplate(id);
+    if (t.owner !== owner) throw new HttpError(403, 'forbidden', 'Only the owner can update this template');
+    const { name, description } = input;
+    if (name !== undefined && (typeof name !== 'string' || !name || name.length > 80)) {
+      throw new HttpError(400, 'invalid_name', 'name is required (max 80 characters)');
+    }
+    if (description !== undefined && (typeof description !== 'string' || description.length > 500)) {
+      throw new HttpError(400, 'invalid_description', 'description must be a string (max 500 characters)');
+    }
+    const mode = input.mode ?? t.mode;
+    if (input.mode !== undefined && input.milestones === undefined && input.mode !== t.mode) {
+      throw new HttpError(400, 'invalid_milestones', 'changing mode requires milestones for the new mode');
+    }
+    // Validate everything before mutating so a rejected update leaves the template unchanged.
+    const milestones = input.milestones !== undefined ? this.parseTemplateMilestones(mode, input.milestones) : undefined;
+    if (name !== undefined) t.name = name as string;
+    if (description !== undefined) t.description = description as string;
+    t.mode = mode as TemplateMode;
+    if (milestones) t.milestones = milestones;
+    t.version += 1;
+    t.updatedAt = this.nowIso();
+    return toPublicTemplate(t);
+  }
+
+  deleteTemplate(id: number, owner: unknown): void {
+    const t = this.getInternalTemplate(id);
+    if (t.owner !== owner) throw new HttpError(403, 'forbidden', 'Only the owner can delete this template');
+    this.templates.delete(id);
   }
 
   stats() {

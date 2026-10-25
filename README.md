@@ -56,11 +56,21 @@ When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHEC
 | GET/POST | `/api/cron/expire-contracts` | Authenticated daily sweep of due unfunded contracts |
 | GET | `/api/v1/disputes` | Admin dispute queue (`?status=`, `?sort=`, `?overdue=`, `?limit=`, `?cursor=`), requires `Authorization: Bearer $ADMIN_READ_TOKEN` |
 | GET | `/api/v1/disputes/:contractId` | Dispute view for one contract (404 if it never had a dispute), same auth |
+| POST/GET | `/api/v1/templates` | Create a milestone template (`fixed` amounts or `percent` bps summing to 10000) / list by `?owner=` |
+| GET/PUT/DELETE | `/api/v1/templates/:id` | Get / update (owner only, bumps `version`) / delete (owner only) a template |
 | GET | `/api/v1/contracts/:id/history` | Hash-chained audit history of a contract (`?limit=`, `?cursor=`) |
 | GET | `/api/v1/audit/verify` | Verify audit chain integrity (`{ valid, entries, brokenAt? }`) |
 | GET | `/metrics` | Prometheus exposition-format metrics (requires `Authorization: Bearer <METRICS_TOKEN>`; disabled when `METRICS_TOKEN` unset) |
 
 *Note: All contract mutation endpoints accept `?receipt=true` to attach a signed `Receipt` JWS header.*
+
+## Milestone templates
+
+`POST /api/v1/contracts` accepts `{ templateId, budget?, client, freelancer, token?, title? }` instead of
+`milestones`. Fixed templates copy their amounts (`budget` not allowed); percent templates require `budget` and
+give each milestone `floor(budget * percentBps / 10000)`, adding the remainder to the last milestone. Supplying both
+`templateId` and `milestones` is a 400. Contracts record `templateId` and `templateVersion`; editing or deleting a
+template never changes contracts already created from it.
 
 ## Audit log
 

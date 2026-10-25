@@ -32,6 +32,11 @@ import {
   CancelBody,
   ListQuery,
   ReputationAddressParam,
+  TemplateIdParam,
+  CreateTemplateBody,
+  UpdateTemplateBody,
+  DeleteTemplateBody,
+  TemplateOwnerQuery,
 } from './validation/schemas';
 import { parseFieldSpec, project } from './utils/project';
 import { createLogger, type Logger, randomUUID } from './logger';
@@ -561,6 +566,11 @@ export function createApp(
         'GET  /api/v1/contracts/:id/parity',
         'GET  /api/v1/reputation/:address',
         'GET  /api/v1/reputation/:address/reviews',
+        'POST /api/v1/templates',
+        'GET  /api/v1/templates',
+        'GET  /api/v1/templates/:id',
+        'PUT  /api/v1/templates/:id',
+        'DELETE /api/v1/templates/:id',
         'GET  /api/v1/contracts/:id/history',
         'GET  /api/v1/audit/verify',
         'GET  /api/v1/disputes (admin)',
@@ -985,6 +995,46 @@ export function createApp(
         }
       }
       return { valid: true, kid: verified.kid, iat: verified.iat, contractId: verified.contractId, matchesCurrent };
+    }),
+  );
+
+  // --- Milestone templates ---
+  // With wallet auth the authenticated address is the owner.
+  const ownerOf = (req: Request): unknown => {
+    const caller = callerOf(req);
+    if (caller === undefined) return req.body?.owner;
+    if (req.body?.owner !== undefined && req.body.owner !== caller) {
+      throw new HttpError(403, 'forbidden', 'Authenticated address must match template owner');
+    }
+    return caller;
+  };
+  v1.post(
+    '/templates',
+    requireAuth,
+    validate({ body: CreateTemplateBody }),
+    wrap((req, res) => {
+      res.status(201).json(store.createTemplate({ ...req.body, owner: ownerOf(req) }));
+    }),
+  );
+  v1.get(
+    '/templates',
+    validate({ query: TemplateOwnerQuery }),
+    wrap((req) => ({ data: store.listTemplates({ owner: req.query.owner as string }) })),
+  );
+  v1.get('/templates/:id', validate({ params: TemplateIdParam }), wrap((req) => store.getTemplate(Number(req.params.id))));
+  v1.put(
+    '/templates/:id',
+    requireAuth,
+    validate({ params: TemplateIdParam, body: UpdateTemplateBody }),
+    wrap((req) => store.updateTemplate(Number(req.params.id), ownerOf(req), req.body)),
+  );
+  v1.delete(
+    '/templates/:id',
+    requireAuth,
+    validate({ params: TemplateIdParam, body: DeleteTemplateBody }),
+    wrap((req) => {
+      store.deleteTemplate(Number(req.params.id), ownerOf(req));
+      return { success: true };
     }),
   );
 

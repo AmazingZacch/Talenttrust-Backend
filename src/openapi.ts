@@ -161,10 +161,56 @@ const spec = {
     { name: 'Transaction' },
     { name: 'Receipts' },
     { name: 'Cron' },
+    { name: 'Templates', description: 'Reusable milestone plans for creating contracts' },
     { name: 'Audit', description: 'Tamper-evident, hash-chained log of escrow state transitions' },
     { name: 'Disputes', description: 'Admin dispute queue. Requires the ADMIN_READ_TOKEN bearer token.' },
   ],
   paths: {
+    '/api/v1/templates': {
+      post: {
+        tags: ['Templates'],
+        summary: 'Create a milestone template (fixed amounts or percent of a budget)',
+        requestBody: { required: true, content: json({ $ref: '#/components/schemas/TemplateInput' }) },
+        responses: { 201: { description: 'Created', content: json({ $ref: '#/components/schemas/Template' }) }, 400: errorResponse('Invalid template') },
+      },
+      get: {
+        tags: ['Templates'],
+        summary: 'List templates of an owner',
+        parameters: [{ name: 'owner', in: 'query', required: true, schema: { type: 'string' } }],
+        responses: { ...ok('Templates', { type: 'object', properties: { data: { type: 'array', items: { $ref: '#/components/schemas/Template' } } } }), 400: errorResponse('owner is required') },
+      },
+    },
+    '/api/v1/templates/{id}': {
+      get: {
+        tags: ['Templates'],
+        summary: 'Get a template',
+        parameters: [idParam],
+        responses: { ...ok('Template', { $ref: '#/components/schemas/Template' }), 404: errorResponse('Template not found') },
+      },
+      put: {
+        tags: ['Templates'],
+        summary: 'Update a template (owner only; bumps version)',
+        parameters: [idParam],
+        requestBody: { required: true, content: json({ $ref: '#/components/schemas/TemplateInput' }) },
+        responses: {
+          ...ok('Updated template', { $ref: '#/components/schemas/Template' }),
+          400: errorResponse('Invalid template'),
+          403: errorResponse('Not the owner'),
+          404: errorResponse('Template not found'),
+        },
+      },
+      delete: {
+        tags: ['Templates'],
+        summary: 'Delete a template (owner only; existing contracts are unaffected)',
+        parameters: [idParam],
+        requestBody: { required: true, content: json({ type: 'object', required: ['owner'], properties: { owner: { type: 'string' } } }) },
+        responses: {
+          ...ok('Deleted', { type: 'object', properties: { success: { type: 'boolean' } } }),
+          403: errorResponse('Not the owner'),
+          404: errorResponse('Template not found'),
+        },
+      },
+    },
     '/api/v1/contracts/{id}/history': {
       get: {
         tags: ['Audit'],
@@ -472,7 +518,7 @@ const spec = {
           required: true,
           content: json({
             type: 'object',
-            required: ['client', 'freelancer', 'milestones'],
+            required: ['client', 'freelancer'],
             properties: {
               title: { type: 'string' },
               client: { type: 'string' },
@@ -482,6 +528,14 @@ const spec = {
                 type: 'string',
                 format: 'date-time',
                 description: 'ISO-8601 deadline, from 1 hour through 90 days after creation (default 14 days)',
+              },
+              templateId: {
+                type: 'integer',
+                description: 'Create from a milestone template instead of `milestones` (exactly one of the two is required)',
+              },
+              budget: {
+                ...amountSchema,
+                description: 'Total budget in base units; required for percent templates, forbidden otherwise',
               },
               milestones: milestonesSchema,
             },
@@ -809,6 +863,52 @@ const spec = {
       },
     },
     schemas: {
+      Template: {
+        type: 'object',
+        properties: {
+          id: { type: 'integer' },
+          owner: { type: 'string' },
+          name: { type: 'string', maxLength: 80 },
+          description: { type: 'string', maxLength: 500 },
+          mode: { type: 'string', enum: ['fixed', 'percent'] },
+          milestones: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                title: { type: 'string' },
+                amount: { type: 'number', description: 'fixed mode (DEPRECATED — lossy above 2^53; use amountUnits)' },
+                amountUnits: { type: 'string', description: 'fixed mode amount in base units' },
+                percentBps: { type: 'integer', description: 'percent mode share; all shares sum to 10000' },
+              },
+            },
+          },
+          version: { type: 'integer' },
+          createdAt: { type: 'string', format: 'date-time' },
+          updatedAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      TemplateInput: {
+        type: 'object',
+        required: ['owner'],
+        properties: {
+          owner: { type: 'string' },
+          name: { type: 'string', maxLength: 80 },
+          description: { type: 'string', maxLength: 500 },
+          mode: { type: 'string', enum: ['fixed', 'percent'] },
+          milestones: {
+            type: 'array',
+            minItems: 1,
+            maxItems: 20,
+            items: {
+              oneOf: [
+                { type: 'object', required: ['amount'], properties: { title: { type: 'string' }, amount: amountSchema } },
+                { type: 'object', required: ['percentBps'], properties: { title: { type: 'string' }, percentBps: { type: 'integer', minimum: 1, maximum: 10000 } } },
+              ],
+            },
+          },
+        },
+      },
       AuditEntry: {
         type: 'object',
         description:
@@ -1117,6 +1217,8 @@ const spec = {
           },
           chain: { $ref: '#/components/schemas/ChainInfo' },
           revision: { type: 'integer', minimum: 1, description: 'Term revision; increments on every edit.' },
+          templateId: { type: 'integer', description: 'Template the milestones were generated from' },
+          templateVersion: { type: 'integer', description: 'Template version used at creation' },
           version: { type: 'integer', minimum: 1, description: 'Entity version behind the ETag; increments on every state change.' },
           createdAt: { type: 'string', format: 'date-time' },
           updatedAt: { type: 'string', format: 'date-time' },
