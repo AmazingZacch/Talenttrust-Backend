@@ -21,6 +21,8 @@ import { allowlist, corsOptionsFor, originGuard } from './cors';
 import { methodNotAllowed, optionsHandler } from './methods';
 import { PauseGuard } from './pauseGuard';
 import { TxRelay } from './tx';
+import { InMemoryEventStore } from './indexer/store';
+import { EventIndexer } from './indexer/indexer';
 import { isWebhookAdminTokenValid, WebhookManager } from './webhooks';
 import { type ChainReadClient, ChainReadError, SorobanChainReadClient } from './stellar/client';
 import { type ChainReader as ChainStatusReader, createStellarChainReader } from './stellar/chain-status';
@@ -457,14 +459,22 @@ export interface AppOptions {
 export function createApp(
   storeOrOpts: EscrowStore | AppDeps = new EscrowStore().seed(),
   /** A chain reader, receipt manager, tx relay or chain read client to inject, or the CORS origin allowlist. */
-  fallbackChainReaderOrReceiptManager?: ChainReader | ReceiptManager | TxRelay | ChainReadClient | string[],
-  options: AppOptions = {},
+  fallbackChainReaderOrReceiptManager?: ChainReader | ReceiptManager | TxRelay | ChainReadClient | InMemoryEventStore | string[],
+  /** App options, or the event indexer to use (with an InMemoryEventStore as the second argument). */
+  optionsOrIndexer: AppOptions | EventIndexer = {},
 ) {
+  const options: AppOptions = optionsOrIndexer instanceof EventIndexer ? {} : optionsOrIndexer;
   const resolved = resolveStoreAndLogger(storeOrOpts);
   const store = resolved.store;
   const logger = resolved.logger;
   const corsOrigins = Array.isArray(fallbackChainReaderOrReceiptManager) ? fallbackChainReaderOrReceiptManager : allowlist();
-  const second = Array.isArray(fallbackChainReaderOrReceiptManager) ? undefined : fallbackChainReaderOrReceiptManager;
+  const eventStore =
+    fallbackChainReaderOrReceiptManager instanceof InMemoryEventStore ? fallbackChainReaderOrReceiptManager : new InMemoryEventStore();
+  const eventIndexer = optionsOrIndexer instanceof EventIndexer ? optionsOrIndexer : new EventIndexer(eventStore);
+  const second =
+    Array.isArray(fallbackChainReaderOrReceiptManager) || fallbackChainReaderOrReceiptManager instanceof InMemoryEventStore
+      ? undefined
+      : fallbackChainReaderOrReceiptManager;
   const chainReader =
     second instanceof ReceiptManager || second instanceof TxRelay || isChainReadClient(second)
       ? resolved.chainReader
@@ -708,6 +718,9 @@ export function createApp(
         'POST /api/v1/auth/token',
         'POST /api/v1/receipts/verify',
         'GET/POST /api/cron/expire-contracts',
+        'GET/POST /api/cron/index-events',
+        'GET  /api/v1/chain/events',
+        'GET  /api/v1/chain/indexer',
       ],
     })),
   );
@@ -882,6 +895,20 @@ export function createApp(
       };
     }),
   );
+  // Indexed on-chain escrow events (see /api/cron/index-events).
+  v1.get(
+    '/chain/events',
+    wrap((req) => {
+      const str = (v: unknown) => (typeof v === 'string' ? v : undefined);
+      const limitRaw = str(req.query.limit);
+      const limit = limitRaw === undefined ? undefined : Number(limitRaw);
+      if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 100)) {
+        throw new HttpError(400, 'invalid_limit', 'limit must be an integer between 1 and 100');
+      }
+      return eventStore.query({ escrowId: str(req.query.escrowId), type: str(req.query.type), limit, cursor: str(req.query.cursor) });
+    }),
+  );
+  v1.get('/chain/indexer', wrap(() => eventIndexer.getState()));
   v1.get('/stats', wrap(() => store.stats()));
   v1.get(
     '/contracts',
@@ -1378,6 +1405,31 @@ export function createApp(
     return { expired: store.sweepExpired(), checkedAt };
   });
   app.get('/api/cron/expire-contracts', expireContracts);
+
+  // Event indexer batch (Vercel cron sends GET). Fails closed (401) without CRON_SECRET.
+  const indexEvents = wrap(async (req) => {
+    const expected = process.env.CRON_SECRET;
+    const supplied = req.get('authorization')?.match(/^Bearer\s+(.+)$/i)?.[1];
+    if (!expected || !supplied || !safeEqual(createHash('sha256').update(supplied).digest('hex'), createHash('sha256').update(expected).digest('hex'))) {
+      throw new HttpError(401, 'unauthorized', 'Valid bearer authorization is required');
+    }
+    // Few, short retries (the batch must fit in a serverless invocation); a busy indexer is not retried.
+    let delay = 500;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await eventIndexer.runOnce();
+      } catch (err) {
+        if (err instanceof Error && err.message === 'indexer_busy') {
+          throw new HttpError(409, 'indexer_busy', 'Indexer is already running');
+        }
+        if (attempt >= 3) throw err;
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        delay *= 2;
+      }
+    }
+  });
+  app.get('/api/cron/index-events', indexEvents);
+  app.post('/api/cron/index-events', indexEvents);
   app.post('/api/cron/expire-contracts', expireContracts);
 
   // Prometheus scrape endpoint; disabled (404) unless METRICS_TOKEN is set, checked per request.

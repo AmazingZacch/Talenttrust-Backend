@@ -164,6 +164,7 @@ const spec = {
     { name: 'Cron' },
     { name: 'Transactions', description: 'Relay of wallet-signed escrow transactions to Soroban RPC' },
     { name: 'Webhooks', description: 'Signed, retried event deliveries (WEBHOOK_ADMIN_TOKEN)' },
+    { name: 'Events', description: 'Indexed on-chain escrow contract events' },
     { name: 'Templates', description: 'Reusable milestone plans for creating contracts' },
     { name: 'Audit', description: 'Tamper-evident, hash-chained log of escrow state transitions' },
     { name: 'Disputes', description: 'Admin dispute queue. Requires the ADMIN_READ_TOKEN bearer token.' },
@@ -662,6 +663,64 @@ const spec = {
         },
       },
     },
+    '/api/cron/index-events': {
+      get: {
+        tags: ['Cron'],
+        summary: 'Index a batch of escrow contract events (Vercel cron; also accepts POST)',
+        description: 'Requires `Authorization: Bearer <CRON_SECRET>`; fails closed with 401 when CRON_SECRET is unset.',
+        parameters: [{ name: 'Authorization', in: 'header', required: true, schema: { type: 'string' } }],
+        responses: {
+          200: {
+            description: 'Indexing completed',
+            content: json({
+              type: 'object',
+              properties: {
+                processed: { type: 'integer' },
+                cursor: { type: 'string' },
+                latestLedger: { type: 'integer' },
+              },
+            }),
+          },
+          401: { description: 'Unauthorized - missing or invalid CRON_SECRET' },
+          409: { description: 'Conflict - indexer already running' },
+        },
+      },
+    },
+    '/api/v1/chain/events': {
+      get: {
+        tags: ['Events'],
+        summary: 'List indexed contract events',
+        parameters: [
+          { name: 'escrowId', in: 'query', schema: { type: 'string' }, description: 'Filter by escrow ID' },
+          { name: 'type', in: 'query', schema: { type: 'string' }, description: 'Filter by event type' },
+          { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100 }, description: 'Max events to return (default 50)' },
+          { name: 'cursor', in: 'query', schema: { type: 'string' }, description: 'Pagination cursor' },
+        ],
+        responses: ok('Events', {
+          type: 'object',
+          properties: {
+            data: { type: 'array', items: { $ref: '#/components/schemas/IndexedEvent' } },
+            nextCursor: { type: 'string' },
+          },
+        }),
+      },
+    },
+    '/api/v1/chain/indexer': {
+      get: {
+        tags: ['Events'],
+        summary: 'Get indexer status',
+        responses: ok('Indexer status', {
+          type: 'object',
+          properties: {
+            cursor: { type: 'string', nullable: true },
+            lastRunAt: { type: 'string', nullable: true },
+            lastError: { type: 'string', nullable: true },
+            eventsStored: { type: 'integer' },
+            lagLedgers: { type: 'integer' },
+          },
+        }),
+      },
+    },
     '/api/v1/stats': { get: { tags: ['System'], summary: 'Aggregate escrow statistics', responses: ok('Stats', { type: 'object', properties: { contracts: { type: 'integer' }, byStatus: { type: 'object' }, totalEscrowed: { description: 'DEPRECATED — lossy above 2^53. Use totalEscrowedUnits.', oneOf: [{ type: 'number' }] }, totalEscrowedUnits: { type: 'string', description: 'Total escrowed in token base units (bigint-safe decimal string).' }, totalReleased: { description: 'DEPRECATED — lossy above 2^53. Use totalReleasedUnits.', oneOf: [{ type: 'number' }] }, totalReleasedUnits: { type: 'string', description: 'Total released in token base units (bigint-safe decimal string).' } } }) } },
     '/api/v1/tx/build': {
       post: {
@@ -1135,6 +1194,162 @@ const spec = {
       },
     },
     schemas: {
+      IndexedEvent: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          ledger: { type: 'integer' },
+          ledgerClosedAt: { type: 'string' },
+          txHash: { type: 'string' },
+          event: {
+            oneOf: [
+              { $ref: '#/components/schemas/CreatedEvent' },
+              { $ref: '#/components/schemas/DepositEvent' },
+              { $ref: '#/components/schemas/ReleaseEvent' },
+              { $ref: '#/components/schemas/DisputeEvent' },
+              { $ref: '#/components/schemas/ResolvedEvent' },
+              { $ref: '#/components/schemas/CancelEvent' },
+              { $ref: '#/components/schemas/ReputationEvent' },
+              { $ref: '#/components/schemas/PausedEvent' },
+              { $ref: '#/components/schemas/InitEvent' },
+              { $ref: '#/components/schemas/UnknownEvent' },
+            ],
+          },
+        },
+      },
+      CreatedEvent: {
+        type: 'object',
+        properties: {
+          type: { type: 'string', enum: ['Created'] },
+          data: {
+            type: 'object',
+            properties: {
+              escrowId: { type: 'string' },
+              client: { type: 'string' },
+              freelancer: { type: 'string' },
+              total: { type: 'string' },
+            },
+          },
+        },
+      },
+      DepositEvent: {
+        type: 'object',
+        properties: {
+          type: { type: 'string', enum: ['Deposit'] },
+          data: {
+            type: 'object',
+            properties: {
+              escrowId: { type: 'string' },
+              amount: { type: 'string' },
+            },
+          },
+        },
+      },
+      ReleaseEvent: {
+        type: 'object',
+        properties: {
+          type: { type: 'string', enum: ['Release'] },
+          data: {
+            type: 'object',
+            properties: {
+              escrowId: { type: 'string' },
+              index: { type: 'integer' },
+              amount: { type: 'string' },
+            },
+          },
+        },
+      },
+      DisputeEvent: {
+        type: 'object',
+        properties: {
+          type: { type: 'string', enum: ['Dispute'] },
+          data: {
+            type: 'object',
+            properties: {
+              escrowId: { type: 'string' },
+              caller: { type: 'string' },
+            },
+          },
+        },
+      },
+      ResolvedEvent: {
+        type: 'object',
+        properties: {
+          type: { type: 'string', enum: ['Resolved'] },
+          data: {
+            type: 'object',
+            properties: {
+              escrowId: { type: 'string' },
+              toFreelancer: { type: 'string' },
+              toClient: { type: 'string' },
+            },
+          },
+        },
+      },
+      CancelEvent: {
+        type: 'object',
+        properties: {
+          type: { type: 'string', enum: ['Cancel'] },
+          data: {
+            type: 'object',
+            properties: {
+              escrowId: { type: 'string' },
+              refund: { type: 'string' },
+            },
+          },
+        },
+      },
+      ReputationEvent: {
+        type: 'object',
+        properties: {
+          type: { type: 'string', enum: ['Reputation'] },
+          data: {
+            type: 'object',
+            properties: {
+              escrowId: { type: 'string' },
+              freelancer: { type: 'string' },
+              rating: { type: 'integer' },
+            },
+          },
+        },
+      },
+      PausedEvent: {
+        type: 'object',
+        properties: {
+          type: { type: 'string', enum: ['Paused'] },
+          data: {
+            type: 'object',
+            properties: {
+              paused: { type: 'boolean' },
+            },
+          },
+        },
+      },
+      InitEvent: {
+        type: 'object',
+        properties: {
+          type: { type: 'string', enum: ['Init'] },
+          data: {
+            type: 'object',
+            properties: {
+              admin: { type: 'string' },
+            },
+          },
+        },
+      },
+      UnknownEvent: {
+        type: 'object',
+        properties: {
+          type: { type: 'string', enum: ['Unknown'] },
+          data: {
+            type: 'object',
+            properties: {
+              topics: { type: 'array', items: { type: 'string' } },
+              value: { type: 'string' },
+            },
+          },
+        },
+      },
       MethodNotAllowedError: {
         type: 'object',
         required: ['error', 'message', 'allowed'],

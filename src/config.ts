@@ -53,6 +53,8 @@ export const config = {
   bodyLimit: resolveBodyLimit(process.env.BODY_LIMIT),
   /** Extra comma-separated CORS origins (added to FRONTEND_URL and local dev origins). */
   corsOrigins: process.env.CORS_ORIGINS || '',
+  /** Poll interval for the long-running server's event indexer (0 = disabled; serverless uses the cron). */
+  indexerIntervalMs: process.env.INDEXER_INTERVAL_MS ? Number(process.env.INDEXER_INTERVAL_MS) : 0,
   /** Max relayed transactions remembered for GET /api/v1/tx. */
   txCacheMax: intEnv(process.env.TX_CACHE_MAX, 200),
 };

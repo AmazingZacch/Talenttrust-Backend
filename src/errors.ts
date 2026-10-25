@@ -110,6 +110,7 @@ export const ERRORS = {
   chain_error: { status: 502, title: 'Chain error', detail: 'On-chain read failed' },
   chain_rate_limited: { status: 429, title: 'Chain reads rate limited', detail: 'Too many chain read requests (60 per minute per client)' },
   method_not_allowed: { status: 405, title: 'Method not allowed', detail: 'The path exists but does not support this HTTP method (see Allow)' },
+  indexer_busy: { status: 409, title: 'Indexer busy', detail: 'The event indexer is already running' },
   origin_not_allowed: { status: 403, title: 'Origin not allowed', detail: 'Origin is not allowed by CORS policy' },
   // On-chain pause
   contract_paused: {
