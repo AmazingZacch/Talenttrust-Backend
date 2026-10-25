@@ -23,6 +23,7 @@ import { parseApiKeysConfig, type ParsedApiKeys } from './auth/apiKeysConfig';
 import { authenticateScopedApiKey, requireScope, type ScopedApiKeyRequest } from './auth/scopedApiKeyMiddleware';
 import { SCOPES } from './auth/scopes';
 import { PauseGuard } from './pauseGuard';
+import { HealthService, createSorobanRpcClient, type HealthRpcClient } from './health';
 import { TxRelay } from './tx';
 import { InMemoryEventStore } from './indexer/store';
 import { EventIndexer } from './indexer/indexer';
@@ -417,6 +418,8 @@ export type AppDeps = {
   chainReadClient?: ChainReadClient;
   /** Scoped API keys (defaults to the API_KEYS env var). */
   apiKeys?: ParsedApiKeys;
+  /** A ready-made readiness service, or overrides for the default one (tests inject `rpc`). */
+  health?: HealthService | { rpc?: HealthRpcClient; timeoutMs?: number; cacheMs?: number };
 };
 
 /**
@@ -489,6 +492,19 @@ export function createApp(
   const deps: AppDeps = isDeps ? ((storeOrOpts as AppDeps | undefined) ?? {}) : {};
   const auth = resolveAuth(deps);
   const pauseGuard = deps.pauseGuard ?? new PauseGuard();
+  const health =
+    deps.health instanceof HealthService
+      ? deps.health
+      : new HealthService({
+          store,
+          // Lazy client: no RPC traffic until /health/ready is called.
+          rpc: deps.health?.rpc ?? createSorobanRpcClient(config.rpcUrl),
+          network: config.network,
+          networkPassphrase: config.networkPassphrase,
+          contractId: config.contractId,
+          timeoutMs: deps.health?.timeoutMs,
+          cacheMs: deps.health?.cacheMs,
+        });
   let chainStatusReader = deps.chainStatusReader;
   const txRelay = second instanceof TxRelay ? second : (deps.txRelay ?? new TxRelay());
   // Fail fast on a malformed API_KEYS value.
@@ -689,6 +705,8 @@ export function createApp(
       chain: { network: config.network, contractId: config.contractId, explorer: explorerUrl() },
       endpoints: [
         'GET  /health',
+        'GET  /health/live',
+        'GET  /health/ready',
         'GET  /docs',
         'GET  /openapi.json',
         'GET  /api/v1/errors',
@@ -764,7 +782,18 @@ export function createApp(
         return { paused: pause.paused, pauseSource: pause.source };
       })(),
       timestamp: new Date().toISOString(),
+      // Summary of the last readiness probe, once one has run.
+      ...(health.lastReport() ? { checks: health.lastReport()!.checks } : {}),
     });
+  });
+
+  // Kubernetes-style probes: liveness never touches a dependency; readiness checks RPC, network, contract, store.
+  app.get('/health/live', wrap(() => health.live()));
+  app.get('/health/ready', (_req, res, next) => {
+    health
+      .ready()
+      .then(({ httpStatus, report }) => res.status(httpStatus).json(report))
+      .catch(next);
   });
 
   app.get('/openapi.json', wrap(() => openapi));

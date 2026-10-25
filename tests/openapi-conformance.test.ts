@@ -61,8 +61,8 @@ describe('OpenAPI document', () => {
       const name = /^#\/components\/responses\/([^/]+)$/.exec(declared.$ref)?.[1];
       return name ? components.responses?.[name] : undefined;
     };
-    // The only documented non-envelope error response: /health while draining.
-    const exceptions = new Set(['GET /health 503']);
+    // The only documented non-envelope error responses: /health while draining and an unready readiness probe.
+    const exceptions = new Set(['GET /health 503', 'GET /health/ready 503']);
 
     const problems: string[] = [];
     for (const [path, pathItem] of Object.entries(paths)) {

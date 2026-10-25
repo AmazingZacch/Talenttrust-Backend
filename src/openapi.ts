@@ -609,6 +609,33 @@ const spec = {
         },
       },
     },
+    '/health/live': {
+      get: {
+        tags: ['System'],
+        summary: 'Liveness probe',
+        description: 'Always 200 while the process is up; touches no dependency.',
+        responses: ok('Process is up', { $ref: '#/components/schemas/Liveness' }),
+      },
+    },
+    '/health/ready': {
+      get: {
+        tags: ['System'],
+        summary: 'Readiness probe',
+        description:
+          'Checks the Soroban RPC health, the network passphrase, the escrow contract ledger ' +
+          'entry and the store in parallel. Results are cached for HEALTH_CACHE_MS with ' +
+          'single-flight. 200 when every check passes (or only warns), 503 when a critical ' +
+          'check fails. Failure details never include the RPC URL.',
+        responses: {
+          200: { description: 'Ready (or degraded)', content: json({ $ref: '#/components/schemas/Readiness' }) },
+          503: {
+            description: 'Unready',
+            'x-plain-json': true,
+            content: json({ $ref: '#/components/schemas/Readiness' }),
+          },
+        },
+      },
+    },
     '/.well-known/talenttrust-receipts.json': {
       get: {
         tags: ['Receipts'],
@@ -1832,6 +1859,41 @@ const spec = {
           paused: { type: 'boolean' },
           pauseSource: { type: 'string', enum: ['chain', 'env', 'none'] },
           timestamp: { type: 'string', format: 'date-time' },
+          checks: {
+            type: 'object',
+            description: 'Summary of the last readiness run, present once one has completed.',
+            additionalProperties: { $ref: '#/components/schemas/HealthCheck' },
+          },
+        },
+      },
+      Liveness: {
+        type: 'object',
+        required: ['status'],
+        additionalProperties: false,
+        properties: { status: { type: 'string', enum: ['ok'] } },
+      },
+      HealthCheck: {
+        type: 'object',
+        required: ['status', 'latencyMs'],
+        additionalProperties: false,
+        properties: {
+          status: { type: 'string', enum: ['pass', 'fail', 'warn'] },
+          latencyMs: { type: 'number', minimum: 0 },
+          detail: { type: 'string', description: 'Fixed string such as "timeout" or a mismatch explanation.' },
+        },
+      },
+      Readiness: {
+        type: 'object',
+        required: ['status', 'checks', 'checkedAt'],
+        additionalProperties: false,
+        properties: {
+          status: { type: 'string', enum: ['ready', 'degraded', 'unready'] },
+          checks: {
+            type: 'object',
+            description: 'rpc, network, contract and storage results.',
+            additionalProperties: { $ref: '#/components/schemas/HealthCheck' },
+          },
+          checkedAt: { type: 'string', format: 'date-time' },
         },
       },
       EscrowContract: {

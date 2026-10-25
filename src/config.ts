@@ -20,6 +20,16 @@ const NETWORK_PASSPHRASES: Record<string, string> = {
   futurenet: 'Test SDF Future Network ; October 2022',
 };
 
+function positiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`Invalid ${name}: "${raw}". Must be a positive integer.`);
+  }
+  return value;
+}
+
 const intEnv = (value: string | undefined, fallback: number) => {
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
@@ -55,6 +65,10 @@ export const config = {
   corsOrigins: process.env.CORS_ORIGINS || '',
   /** Poll interval for the long-running server's event indexer (0 = disabled; serverless uses the cron). */
   indexerIntervalMs: process.env.INDEXER_INTERVAL_MS ? Number(process.env.INDEXER_INTERVAL_MS) : 0,
+  /** Per-check timeout for /health/ready. */
+  healthCheckTimeoutMs: positiveIntEnv('HEALTH_CHECK_TIMEOUT_MS', 2000),
+  /** How long /health/ready reuses the last result (single-flight in between). */
+  healthCacheMs: positiveIntEnv('HEALTH_CACHE_MS', 10000),
   /** Max relayed transactions remembered for GET /api/v1/tx. */
   txCacheMax: intEnv(process.env.TX_CACHE_MAX, 200),
 };
