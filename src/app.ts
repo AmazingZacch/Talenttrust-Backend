@@ -5,6 +5,7 @@ import compression from 'compression';
 import { config, explorerUrl } from './config';
 import { EscrowStore, HttpError, LIST_STATUSES, type Cursor, type EscrowContract, type QueryFilters } from './store';
 import { openapi, docsHtml } from './openapi';
+import { PauseGuard } from './pauseGuard';
 import { ERRORS, PROBLEM_TYPE_BASE, isErrorKey } from './errors';
 import { validate } from './validation/middleware';
 import {
@@ -242,6 +243,8 @@ export type AppDeps = {
   receiptManager?: ReceiptManager;
   /** Prometheus registry; each app gets its own unless one is injected. */
   registry?: Registry;
+  /** On-chain pause check (operator override + cached Soroban `is_paused`). */
+  pauseGuard?: PauseGuard;
 };
 
 /**
@@ -298,6 +301,18 @@ export function createApp(
   const isDeps = !(storeOrOpts && typeof (storeOrOpts as EscrowStore).list === 'function');
   const deps: AppDeps = isDeps ? ((storeOrOpts as AppDeps | undefined) ?? {}) : {};
   const auth = resolveAuth(deps);
+  const pauseGuard = deps.pauseGuard ?? new PauseGuard();
+  /** 503 for mutations whose Soroban counterparts call require_not_paused. */
+  const requireNotPaused = async (_req: Request, res: Response, next: NextFunction) => {
+    try {
+      const status = await pauseGuard.isPaused();
+      if (!status.paused) return next();
+      res.setHeader('Retry-After', '60');
+      next(new HttpError('contract_paused', undefined, { source: status.source }));
+    } catch (err) {
+      next(err);
+    }
+  };
   // Created lazily so apps that never sign receipts don't generate a key (or warn).
   let receiptManagerInstance: ReceiptManager | undefined =
     second instanceof ReceiptManager ? second : (options.receiptManager ?? deps.receiptManager);
@@ -462,6 +477,11 @@ export function createApp(
       version: config.version,
       uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
       storage: 'in-memory',
+      ...(() => {
+        // Non-blocking: the last known pause state; a stale cache refreshes in the background.
+        const pause = pauseGuard.peek();
+        return { paused: pause.paused, pauseSource: pause.source };
+      })(),
       timestamp: new Date().toISOString(),
     });
   });
@@ -566,12 +586,17 @@ export function createApp(
 
   v1.get(
     '/chain',
-    wrap(() => ({
-      network: config.network,
-      rpcUrl: config.rpcUrl,
-      contractId: config.contractId,
-      explorer: explorerUrl(),
-    })),
+    wrap(async () => {
+      const pause = await pauseGuard.isPaused();
+      return {
+        network: config.network,
+        rpcUrl: config.rpcUrl,
+        contractId: config.contractId,
+        explorer: explorerUrl(),
+        paused: pause.paused,
+        pauseSource: pause.source,
+      };
+    }),
   );
   v1.post(
     '/tx/build',
@@ -600,6 +625,7 @@ export function createApp(
   );
   v1.post(
     '/contracts',
+    requireNotPaused,
     requireAuth,
     (req, _res, next) => {
       // With wallet auth the client is the authenticated address: reject a
@@ -701,6 +727,7 @@ export function createApp(
   );
   v1.post(
     '/contracts/:id/deposit',
+    requireNotPaused,
     requireAuth,
     validate({ params: IdParam, body: DepositBody }),
     checkPreconditions,
@@ -713,6 +740,7 @@ export function createApp(
   );
   v1.post(
     '/contracts/:id/milestones/:index/release',
+    requireNotPaused,
     requireAuth,
     validate({ params: MilestoneReleaseParams }),
     checkPreconditions,
@@ -725,6 +753,7 @@ export function createApp(
   );
   v1.post(
     '/contracts/:id/dispute',
+    requireNotPaused,
     requireAuth,
     validate({ params: IdParam, body: DisputeBody }),
     checkPreconditions,
@@ -748,6 +777,7 @@ export function createApp(
   );
   v1.post(
     '/contracts/:id/cancel',
+    requireNotPaused,
     requireAuth,
     validate({ params: IdParam, body: CancelBody }),
     checkPreconditions,

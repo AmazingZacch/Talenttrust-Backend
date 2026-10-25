@@ -85,6 +85,13 @@ export const ERRORS = {
   challenge_replayed: { status: 401, title: 'Challenge replayed', detail: 'Challenge has already been used' },
   invalid_signature: { status: 401, title: 'Invalid signature', detail: 'Signature is missing or does not verify' },
   cron_unauthorized: { status: 401, title: 'Cron unauthorized', detail: 'Valid bearer authorization is required' },
+  // On-chain pause
+  contract_paused: {
+    status: 503,
+    title: 'Contract paused',
+    detail: 'Contract mutations are currently paused',
+    contractError: { name: 'Paused', code: 4 },
+  },
   // Concurrency / receipts
   precondition_failed: { status: 412, title: 'Precondition failed', detail: 'If-Match does not match the current ETag' },
   precondition_required: { status: 428, title: 'Precondition required', detail: 'If-Match header is required' },

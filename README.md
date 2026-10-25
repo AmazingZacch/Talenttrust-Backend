@@ -20,13 +20,15 @@ data is per-instance and resets on redeploy.
 
 All `GET` endpoints for contracts return strong `ETag` and `Cache-Control: no-cache` headers and support `If-None-Match` conditional requests (returning `304 Not Modified` when matched). All `POST /api/v1/contracts/:id/*` mutation endpoints support `If-Match` for optimistic concurrency control (returning `412 Precondition Failed` on mismatch and `428 Precondition Required` when mandatory).
 
+When the escrow contract is paused on-chain (`is_paused`, cached for `PAUSE_CHECK_TTL_MS`) or via the `API_PAUSED=true` operator override, mutations that mirror Soroban functions calling `require_not_paused` (`create`, `deposit`, `release`, `dispute`, `cancel`) are rejected with `503 Service Unavailable` (`Retry-After: 60`, `contractError: { name: 'Paused', code: 4 }`). Read-only endpoints as well as dispute resolution (`resolve`) and reputation rating (`reputation`) remain active.
+
 | Method | Path | Description |
 | --- | --- | --- |
 | GET | `/` | Service info and endpoint list (JSON) |
-| GET | `/health` | Health check |
+| GET | `/health` | Health check (includes `paused` and `pauseSource`) |
 | GET | `/docs` | Swagger UI |
 | GET | `/openapi.json` | OpenAPI 3 spec |
-| GET | `/api/v1/chain` | On-chain contract deployment info |
+| GET | `/api/v1/chain` | On-chain contract deployment info (includes `paused` and `pauseSource`) |
 | GET | `/api/v1/stats` | Aggregate statistics |
 | GET | `/api/v1/auth/challenge` | Request a sign challenge (`?address=G…`) |
 | POST | `/api/v1/auth/token` | Exchange a signed challenge for a bearer token |

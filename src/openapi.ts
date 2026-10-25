@@ -289,7 +289,21 @@ const spec = {
       },
     },
     '/api/v1/chain': {
-      get: { tags: ['System'], summary: 'On-chain escrow contract deployment info', responses: ok('Deployment') },
+      get: {
+        tags: ['System'],
+        summary: 'On-chain escrow contract deployment info',
+        responses: ok('Deployment', {
+          type: 'object',
+          properties: {
+            network: { type: 'string' },
+            rpcUrl: { type: 'string' },
+            contractId: { type: 'string' },
+            explorer: { type: 'string' },
+            paused: { type: 'boolean' },
+            pauseSource: { type: 'string', enum: ['chain', 'env', 'none'] },
+          },
+        }),
+      },
     },
     '/api/v1/stats': { get: { tags: ['System'], summary: 'Aggregate escrow statistics', responses: ok('Stats', { type: 'object', properties: { contracts: { type: 'integer' }, byStatus: { type: 'object' }, totalEscrowed: { description: 'DEPRECATED — lossy above 2^53. Use totalEscrowedUnits.', oneOf: [{ type: 'number' }] }, totalEscrowedUnits: { type: 'string', description: 'Total escrowed in token base units (bigint-safe decimal string).' }, totalReleased: { description: 'DEPRECATED — lossy above 2^53. Use totalReleasedUnits.', oneOf: [{ type: 'number' }] }, totalReleasedUnits: { type: 'string', description: 'Total released in token base units (bigint-safe decimal string).' } } }) } },
     '/api/v1/tx/build': {
@@ -1361,7 +1375,33 @@ function withProblems<T extends { paths: object; components: object }>(doc: T): 
   return doc;
 }
 
-export const openapi = withProblems(withEtags(withBearerAuth(withIdempotency(withReceipts(spec)))));
+/** Mutations rejected with 503 contract_paused while the escrow contract is paused. */
+function withPauseGuard<T extends { paths: object }>(doc: T): T {
+  const paths = doc.paths as Record<string, { post?: Operation }>;
+  for (const path of [
+    '/api/v1/contracts',
+    '/api/v1/contracts/{id}/deposit',
+    '/api/v1/contracts/{id}/milestones/{index}/release',
+    '/api/v1/contracts/{id}/dispute',
+    '/api/v1/contracts/{id}/cancel',
+  ]) {
+    const op = paths[path]?.post;
+    if (!op) continue;
+    op.responses = {
+      ...op.responses,
+      503: {
+        description:
+          'contract_paused — the escrow contract is paused on-chain or by API_PAUSED (`Retry-After: 60`, ' +
+          '`contractError: { name: "Paused", code: 4 }`)',
+        headers: { 'Retry-After': { schema: { type: 'integer' } } },
+        content: json({ $ref: '#/components/schemas/ErrorResponse' }),
+      },
+    };
+  }
+  return doc;
+}
+
+export const openapi = withProblems(withPauseGuard(withEtags(withBearerAuth(withIdempotency(withReceipts(spec))))));
 
 export const docsHtml = `<!doctype html>
 <html lang="en">
