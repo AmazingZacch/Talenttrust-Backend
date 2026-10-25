@@ -105,6 +105,10 @@ export const ERRORS = {
   rpc_error: { status: 502, title: 'RPC error', detail: 'Unexpected response from Soroban RPC' },
   invalid_hash: { status: 400, title: 'Invalid hash', detail: 'Transaction hash must be a 64-character hex string' },
   too_many_waits: { status: 503, title: 'Too many waits', detail: 'Too many concurrent long-poll requests' },
+  // On-chain read-through
+  invalid_chain_id: { status: 400, title: 'Invalid chain id', detail: 'chainId must be a positive u64' },
+  chain_error: { status: 502, title: 'Chain error', detail: 'On-chain read failed' },
+  chain_rate_limited: { status: 429, title: 'Chain reads rate limited', detail: 'Too many chain read requests (60 per minute per client)' },
   // On-chain pause
   contract_paused: {
     status: 503,

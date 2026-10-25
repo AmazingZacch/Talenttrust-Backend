@@ -19,6 +19,7 @@ import {
 import { openapi, docsHtml } from './openapi';
 import { PauseGuard } from './pauseGuard';
 import { TxRelay } from './tx';
+import { type ChainReadClient, ChainReadError, SorobanChainReadClient } from './stellar/client';
 import { type ChainReader as ChainStatusReader, createStellarChainReader } from './stellar/chain-status';
 import { ERRORS, PROBLEM_TYPE_BASE, isErrorKey } from './errors';
 import { validate } from './validation/middleware';
@@ -105,6 +106,64 @@ const requireObjectBody = (req: Request, _res: Response, next: NextFunction) => 
 
 /** Content-Type + JSON-object checks for the body-taking routes (run before auth/validation). */
 const jsonObjectBody = [requireJson, requireObjectBody];
+
+/** Bounded TTL cache with single-flight: concurrent identical chain reads share one simulation. */
+class ChainReadCache {
+  private readonly values = new Map<string, { expiresAt: number; promise: Promise<unknown> }>();
+
+  constructor(
+    private readonly ttlMs: number,
+    private readonly maxEntries = 256,
+  ) {}
+
+  get<T>(key: string, load: () => Promise<T>): Promise<T> {
+    const now = Date.now();
+    const cached = this.values.get(key);
+    if (cached && cached.expiresAt > now) return cached.promise as Promise<T>;
+    if (cached) this.values.delete(key);
+    while (this.values.size >= this.maxEntries) this.values.delete(this.values.keys().next().value as string);
+    const promise = load();
+    this.values.set(key, { expiresAt: now + this.ttlMs, promise });
+    promise.catch(() => {
+      if (this.values.get(key)?.promise === promise) this.values.delete(key);
+    });
+    return promise;
+  }
+}
+
+/** Fixed-window per-client limit for chain read endpoints. */
+class ChainRateLimiter {
+  private readonly clients = new Map<string, { windowStarted: number; count: number }>();
+
+  constructor(
+    private readonly maxRequests = 60,
+    private readonly windowMs = 60_000,
+    private readonly maxClients = 1024,
+  ) {}
+
+  allow(key: string): boolean {
+    const now = Date.now();
+    const current = this.clients.get(key);
+    if (!current || now - current.windowStarted >= this.windowMs) {
+      while (this.clients.size >= this.maxClients) this.clients.delete(this.clients.keys().next().value as string);
+      this.clients.set(key, { windowStarted: now, count: 1 });
+      return true;
+    }
+    if (current.count >= this.maxRequests) return false;
+    current.count += 1;
+    return true;
+  }
+}
+
+const chainIdParam = (raw: string): bigint => {
+  if (!/^[1-9]\d*$/.test(raw)) throw new HttpError(400, 'invalid_chain_id', 'chainId must be a positive u64');
+  const value = BigInt(raw);
+  if (value > 18_446_744_073_709_551_615n) throw new HttpError(400, 'invalid_chain_id', 'chainId must be a positive u64');
+  return value;
+};
+
+const isChainReadClient = (value: unknown): value is ChainReadClient =>
+  !!value && typeof value === 'object' && typeof (value as ChainReadClient).getReputation === 'function';
 
 const id = (req: Request) => {
   const n = Number(req.params.id);
@@ -346,6 +405,8 @@ export type AppDeps = {
   chainStatusReader?: ChainStatusReader;
   /** Relays signed escrow transactions to Soroban RPC (POST /api/v1/tx/submit). */
   txRelay?: TxRelay;
+  /** Read-through client for /api/v1/chain/contracts and /api/v1/chain/reputation. */
+  chainReadClient?: ChainReadClient;
 };
 
 /**
@@ -392,7 +453,7 @@ export interface AppOptions {
 
 export function createApp(
   storeOrOpts: EscrowStore | AppDeps = new EscrowStore().seed(),
-  fallbackChainReaderOrReceiptManager?: ChainReader | ReceiptManager | TxRelay,
+  fallbackChainReaderOrReceiptManager?: ChainReader | ReceiptManager | TxRelay | ChainReadClient,
   options: AppOptions = {},
 ) {
   const resolved = resolveStoreAndLogger(storeOrOpts);
@@ -400,7 +461,9 @@ export function createApp(
   const logger = resolved.logger;
   const second = fallbackChainReaderOrReceiptManager;
   const chainReader =
-    second instanceof ReceiptManager || second instanceof TxRelay ? resolved.chainReader : (second ?? resolved.chainReader);
+    second instanceof ReceiptManager || second instanceof TxRelay || isChainReadClient(second)
+      ? resolved.chainReader
+      : ((second as ChainReader | undefined) ?? resolved.chainReader);
   const txRpcServer = resolved.txRpcServer;
   const isDeps = !(storeOrOpts && typeof (storeOrOpts as EscrowStore).list === 'function');
   const deps: AppDeps = isDeps ? ((storeOrOpts as AppDeps | undefined) ?? {}) : {};
@@ -408,6 +471,17 @@ export function createApp(
   const pauseGuard = deps.pauseGuard ?? new PauseGuard();
   let chainStatusReader = deps.chainStatusReader;
   const txRelay = second instanceof TxRelay ? second : (deps.txRelay ?? new TxRelay());
+  let chainReadClient: ChainReadClient | undefined = isChainReadClient(second) ? second : deps.chainReadClient;
+  const chainClient = () => (chainReadClient ??= new SorobanChainReadClient());
+  const chainReadTtl = Number(process.env.CHAIN_READ_TTL_MS ?? 5000);
+  const chainCache = new ChainReadCache(Number.isFinite(chainReadTtl) && chainReadTtl >= 0 ? chainReadTtl : 5000);
+  const chainRateLimiter = new ChainRateLimiter();
+  const allowChainRead = (req: Request, res: Response) => {
+    if (!chainRateLimiter.allow(req.ip || 'unknown')) {
+      res.setHeader('Retry-After', '60');
+      throw new HttpError(429, 'chain_rate_limited', 'Too many chain read requests');
+    }
+  };
   const chainStatus = () => (chainStatusReader ??= createStellarChainReader());
   /** 503 for mutations whose Soroban counterparts call require_not_paused. */
   const requireNotPaused = async (_req: Request, res: Response, next: NextFunction) => {
@@ -555,6 +629,8 @@ export function createApp(
         'GET  /metrics',
         'GET  /.well-known/talenttrust-receipts.json',
         'GET  /api/v1/chain',
+        'GET  /api/v1/chain/contracts/:chainId',
+        'GET  /api/v1/chain/reputation/:address',
         'GET  /api/v1/stats',
         'POST /api/v1/tx/build',
         'GET  /api/v1/contracts',
@@ -737,6 +813,35 @@ export function createApp(
     wrap(async (req) =>
       buildEscrowTransaction(req.body, txRpcServer ? { server: txRpcServer } : {}),
     ),
+  );
+  // Read-through views of the on-chain escrow contract (amounts as exact decimal strings).
+  v1.get(
+    '/chain/contracts/:chainId',
+    wrap(async (req, res) => {
+      allowChainRead(req, res);
+      const chainId = chainIdParam(req.params.chainId);
+      const result = await chainCache.get(`contract:${chainId}`, () => chainClient().getContract(chainId));
+      return { ...result.value, source: 'chain', latestLedger: result.latestLedger };
+    }),
+  );
+  v1.get(
+    '/chain/reputation/:address',
+    wrap(async (req, res) => {
+      allowChainRead(req, res);
+      const address = req.params.address;
+      if (!isValidStellarAddress(address)) {
+        throw new HttpError(400, 'invalid_address', 'address must be a valid Stellar account');
+      }
+      const result = await chainCache.get(`reputation:${address}`, () => chainClient().getReputation(address));
+      const { completedContracts, totalRating } = result.value;
+      return {
+        address,
+        completedContracts,
+        totalRating,
+        averageRating: completedContracts ? Math.round((totalRating / completedContracts) * 100) / 100 : 0,
+        source: 'chain',
+      };
+    }),
   );
   v1.get('/stats', wrap(() => store.stats()));
   v1.get(
@@ -1218,6 +1323,18 @@ export function createApp(
     };
     if (err instanceof HttpError) {
       sendProblem(err);
+      return;
+    }
+    if (err instanceof ChainReadError) {
+      // Never echo provider errors: map to stable codes.
+      if (err.failure === 'not_found') {
+        sendProblem(new HttpError(404, 'contract_not_found', 'On-chain contract not found'));
+      } else if (err.failure === 'contract') {
+        sendProblem(new HttpError(502, 'chain_error', 'On-chain read failed', { contractError: err.contractError }));
+      } else {
+        res.setHeader('Retry-After', '1');
+        sendProblem(new HttpError(503, 'chain_unavailable', 'On-chain service temporarily unavailable'));
+      }
       return;
     }
     if (err instanceof TxBuildError) {
