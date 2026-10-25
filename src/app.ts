@@ -16,7 +16,8 @@ import {
   type EscrowContract,
   type QueryFilters,
 } from './store';
-import { openapi, docsHtml } from './openapi';
+import { openapi, docsHtml, docsCsp } from './openapi';
+import { allowlist, corsOptionsFor, originGuard } from './cors';
 import { PauseGuard } from './pauseGuard';
 import { TxRelay } from './tx';
 import { isWebhookAdminTokenValid, WebhookManager } from './webhooks';
@@ -454,13 +455,15 @@ export interface AppOptions {
 
 export function createApp(
   storeOrOpts: EscrowStore | AppDeps = new EscrowStore().seed(),
-  fallbackChainReaderOrReceiptManager?: ChainReader | ReceiptManager | TxRelay | ChainReadClient,
+  /** A chain reader, receipt manager, tx relay or chain read client to inject, or the CORS origin allowlist. */
+  fallbackChainReaderOrReceiptManager?: ChainReader | ReceiptManager | TxRelay | ChainReadClient | string[],
   options: AppOptions = {},
 ) {
   const resolved = resolveStoreAndLogger(storeOrOpts);
   const store = resolved.store;
   const logger = resolved.logger;
-  const second = fallbackChainReaderOrReceiptManager;
+  const corsOrigins = Array.isArray(fallbackChainReaderOrReceiptManager) ? fallbackChainReaderOrReceiptManager : allowlist();
+  const second = Array.isArray(fallbackChainReaderOrReceiptManager) ? undefined : fallbackChainReaderOrReceiptManager;
   const chainReader =
     second instanceof ReceiptManager || second instanceof TxRelay || isChainReadClient(second)
       ? resolved.chainReader
@@ -507,6 +510,9 @@ export function createApp(
   // Strong, version-based ETags are set explicitly on contract routes.
   app.set('etag', false);
   app.disable('x-powered-by');
+  // Trust the first hop (Vercel / any reverse proxy) so req.protocol reflects X-Forwarded-Proto;
+  // originGuard compares same-origin requests against it.
+  app.set('trust proxy', 1);
   // Correlation id: echo a valid inbound X-Request-Id, otherwise generate one.
   // The regex excludes CR/LF so a client cannot inject log-line terminators.
   app.use((req, res, next) => {
@@ -548,8 +554,32 @@ export function createApp(
   ]);
   store.setMutationRecorder((action, result) => escrowMutationsTotal.inc({ action, result }));
 
-  app.use(helmet({ contentSecurityPolicy: false }));
-  app.use(cors());
+  app.use(
+    helmet({
+      contentSecurityPolicy: {
+        useDefaults: false,
+        directives: {
+          'default-src': ["'self'"],
+          'base-uri': ["'self'"],
+          // unpkg hosts the pinned Swagger UI assets on /docs (all SRI-checked);
+          // docsCsp allows that page's own inline style/script and nothing else.
+          'script-src': ["'self'", 'https://unpkg.com', docsCsp.script],
+          'script-src-attr': ["'none'"],
+          'style-src': ["'self'", 'https://unpkg.com', docsCsp.style],
+          'style-src-attr': ["'unsafe-inline'"],
+          'img-src': ["'self'", 'data:'],
+          'font-src': ["'self'", 'data:', 'https://unpkg.com'],
+          'connect-src': ["'self'"],
+          'object-src': ["'none'"],
+          'frame-ancestors': ["'none'"],
+          'form-action': ["'self'"],
+        },
+      },
+    }),
+  );
+  // Unknown cross-origin callers get 403 before any handler; allowlisted ones get CORS headers.
+  app.use(originGuard(corsOrigins));
+  app.use(cors(corsOptionsFor(corsOrigins)));
 
   // Compression middleware: gzip/br for JSON responses ≥ 1 KB.
   // Excluded for text/event-stream and when Cache-Control: no-transform is set.

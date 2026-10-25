@@ -51,6 +51,8 @@ export const config = {
   /** Set PAUSE_CHECK_CHAIN=false to skip the on-chain is_paused probe (tests, offline dev). */
   pauseCheckChain: process.env.PAUSE_CHECK_CHAIN !== 'false',
   bodyLimit: resolveBodyLimit(process.env.BODY_LIMIT),
+  /** Extra comma-separated CORS origins (added to FRONTEND_URL and local dev origins). */
+  corsOrigins: process.env.CORS_ORIGINS || '',
   /** Max relayed transactions remembered for GET /api/v1/tx. */
   txCacheMax: intEnv(process.env.TX_CACHE_MAX, 200),
 };

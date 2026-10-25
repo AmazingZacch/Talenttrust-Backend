@@ -193,6 +193,18 @@ edits/withdrawals require the caller to be the contract client (`POST /contracts
 caller); `dispute` and `reviews` require the client or freelancer. A body `raisedBy`/`reviewer`/`client` is
 accepted for backwards compatibility but rejected (`403 forbidden`) if it differs from the token subject.
 
+## Security
+
+- **CORS allowlist**: cross-origin requests are answered only for `FRONTEND_URL`, extra origins listed
+  in `CORS_ORIGINS` (comma-separated), local dev origins outside production, and the API's own origin.
+  Any other `Origin` gets `403 origin_not_allowed` before a handler runs; requests without an `Origin`
+  (curl, server-to-server) are unaffected.
+- **CSP**: every response carries a `Content-Security-Policy` (no `unsafe-inline` scripts) that permits
+  only self-hosted code plus the pinned Swagger UI assets on `/docs`.
+- **SRI**: the `/docs` page loads `swagger-ui-dist@5.17.14` from unpkg with `sha384` `integrity`
+  hashes and `crossorigin="anonymous"`; the page's inline style/script are allowed by exact `sha256`
+  hashes derived from the served markup.
+
 ## Development
 
 ```bash
@@ -207,7 +219,7 @@ Configuration (all optional, see `.env.example`): `PORT`, `LOG_LEVEL` (debug|inf
 `METRICS_TOKEN` (protects `GET /metrics`; when unset the endpoint is disabled),
 `CURSOR_SECRET` (signs contract-list cursors; random per-process default), `REQUIRE_IF_MATCH` (`true` makes `If-Match` mandatory on contract mutations),
 `ESCROW_CONTRACT_ID`, `STELLAR_NETWORK`, `STELLAR_RPC_URL`, `STELLAR_NETWORK_PASSPHRASE`, `TX_TIMEOUT_SECONDS`, `FRONTEND_URL`, `IDEMPOTENCY_REQUIRED`, `AUTH_SECRET`, `AUTH_REQUIRED`,
-`BODY_LIMIT` (maximum request body size, default `100kb`), `REPUTATION_PRIOR_WEIGHT` (Bayesian prior weight C, default 5), `RPC_TIMEOUT_MS` (default 4000), `TX_CACHE_MAX` (recent relayed transactions kept, default 200), `CHAIN_READ_TTL_MS` (cache for the
+`BODY_LIMIT` (maximum request body size, default `100kb`), `CORS_ORIGINS` (extra comma-separated CORS origins), `REPUTATION_PRIOR_WEIGHT` (Bayesian prior weight C, default 5), `RPC_TIMEOUT_MS` (default 4000), `TX_CACHE_MAX` (recent relayed transactions kept, default 200), `CHAIN_READ_TTL_MS` (cache for the
 `/api/v1/chain/contracts` and `/api/v1/chain/reputation` read-through endpoints, default 5000; identical concurrent
 reads share one simulation and each client may make 60 chain reads per minute), `CHAIN_STATUS_TTL_MS`
 (default 15000), `CHAIN_REFRESH_MIN_INTERVAL_MS` (default 5000),
