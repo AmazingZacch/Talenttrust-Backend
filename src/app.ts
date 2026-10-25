@@ -24,6 +24,7 @@ import { createLogger, type Logger, randomUUID } from './logger';
 import { ChainReader, SorobanRpcChainReader } from './chain';
 import { buildEscrowTransaction, TxBuildError, type RpcClient } from './stellar/escrowTxBuilder';
 import { bigIntReplacer } from './amount';
+import { createHash, timingSafeEqual } from 'crypto';
 import { StrKey, Keypair } from '@stellar/stellar-sdk';
 import { randomBytes } from 'crypto';
 import { buildChallenge, verifyChallenge, consumeNonce } from './auth/challenge';
@@ -76,6 +77,20 @@ function parseFields(req: Request) {
   if (typeof raw !== 'string') return null;
   return parseFieldSpec(raw);
 }
+
+/** Bearer check for the cron sweep; fails closed (404) when CRON_SECRET is unset. */
+const requireCronSecret = (req: Request) => {
+  const expected = process.env.CRON_SECRET;
+  if (!expected) throw new HttpError(404, 'not_found', 'Cron endpoint is not configured');
+  const supplied = req.get('authorization')?.match(/^Bearer\s+(.+)$/i)?.[1];
+  if (!supplied) throw new HttpError(401, 'cron_unauthorized', 'Valid bearer authorization is required');
+  // Compare fixed-length digests so the comparison is constant-time and length-independent.
+  const expectedBytes = createHash('sha256').update(expected).digest();
+  const suppliedBytes = createHash('sha256').update(supplied).digest();
+  if (!timingSafeEqual(expectedBytes, suppliedBytes)) {
+    throw new HttpError(401, 'cron_unauthorized', 'Valid bearer authorization is required');
+  }
+};
 
 const REQUEST_ID_RE = /^[A-Za-z0-9._-]{8,128}$/;
 
@@ -256,6 +271,7 @@ export function createApp(
         'DELETE /api/v1/contracts/:id',
         'GET  /api/v1/contracts/:id/revisions',
         'POST /api/v1/contracts/:id/deposit',
+        'POST /api/v1/contracts/:id/extend-deadline',
         'POST /api/v1/contracts/:id/milestones/:index/release',
         'POST /api/v1/contracts/:id/dispute',
         'POST /api/v1/contracts/:id/resolve',
@@ -269,6 +285,7 @@ export function createApp(
         'GET  /api/v1/auth/challenge',
         'POST /api/v1/auth/token',
         'POST /api/v1/receipts/verify',
+        'GET/POST /api/cron/expire-contracts',
       ],
     })),
   );
@@ -439,6 +456,11 @@ export function createApp(
   );
   v1.get('/contracts/:id/revisions', wrap((req) => store.getRevisions(id(req))));
   v1.post(
+    '/contracts/:id/extend-deadline',
+    requireAuth,
+    wrap((req) => store.extendDeadline(id(req), clientOf(req), req.body?.fundingDeadline)),
+  );
+  v1.post(
     '/contracts/:id/deposit',
     requireAuth,
     validate({ params: IdParam, body: DepositBody }),
@@ -567,6 +589,15 @@ export function createApp(
   );
 
   app.use('/api/v1', v1);
+
+  // Daily Vercel cron (see vercel.json); also callable manually with the bearer secret.
+  const expireContracts = wrap((req) => {
+    requireCronSecret(req);
+    const checkedAt = store.currentTime();
+    return { expired: store.sweepExpired(), checkedAt };
+  });
+  app.get('/api/cron/expire-contracts', expireContracts);
+  app.post('/api/cron/expire-contracts', expireContracts);
 
   app.use((req, res) => {
     res.status(404).json({ error: 'not_found', message: `No route for ${req.method} ${req.path}`, requestId: req.id, docs: '/docs' });

@@ -21,7 +21,8 @@ export type ContractStatus =
   | 'Completed'
   | 'Disputed'
   | 'Resolved'
-  | 'Cancelled';
+  | 'Cancelled'
+  | 'Expired';
 
 export interface Milestone {
   index: number;
@@ -82,6 +83,13 @@ export interface EscrowContract {
   revision: number;
   createdAt: string;
   updatedAt: string;
+  /** Contracts still `Created` (not fully funded) at this instant expire. */
+  fundingDeadline: string;
+  expiredAt?: string;
+  /** @deprecated lossy above 2^53; use refundableAmountUnits */
+  refundableAmount?: number;
+  /** Amount returned to the client when a partially funded contract expired (base units). */
+  refundableAmountUnits?: string;
 }
 
 export interface ContractRevision {
@@ -135,9 +143,29 @@ interface InternalContract {
   revisions: ContractRevision[];
   createdAt: string;
   updatedAt: string;
+  fundingDeadline: string;
+  expiredAt?: string;
+  refundableAmount?: bigint;
 }
 
 const MAX_MILESTONES = 20;
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+const DEFAULT_FUNDING_WINDOW_MS = 14 * DAY_MS;
+const MAX_FUNDING_WINDOW_MS = 90 * DAY_MS;
+
+export type Clock = () => Date;
+
+const parseIsoMillis = (value: unknown): number | undefined => {
+  if (
+    typeof value !== 'string' ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/.test(value)
+  ) {
+    return undefined;
+  }
+  const millis = Date.parse(value);
+  return Number.isFinite(millis) ? millis : undefined;
+};
 const MAX_REVISIONS = 50;
 const ACTIVE: ContractStatus[] = ['Created', 'Funded'];
 
@@ -205,6 +233,10 @@ function toPublic(c: InternalContract): EscrowContract {
     revision: c.revision,
     createdAt: c.createdAt,
     updatedAt: c.updatedAt,
+    fundingDeadline: c.fundingDeadline,
+    expiredAt: c.expiredAt,
+    refundableAmount: c.refundableAmount === undefined ? undefined : Number(c.refundableAmount),
+    refundableAmountUnits: c.refundableAmount?.toString(),
   };
 }
 
@@ -216,8 +248,45 @@ export class EscrowStore {
   private nextReviewId = 1;
   private nextId = 1;
 
+  constructor(private readonly clock: Clock = () => new Date()) {}
+
+  private now(): Date {
+    return this.clock();
+  }
+
+  private nowIso(): string {
+    return this.now().toISOString();
+  }
+
+  currentTime(): string {
+    return this.nowIso();
+  }
+
+  private validateCreationDeadline(value: unknown, now: number): string {
+    if (value === undefined) return new Date(now + DEFAULT_FUNDING_WINDOW_MS).toISOString();
+    const deadline = parseIsoMillis(value);
+    if (deadline === undefined || deadline < now + HOUR_MS || deadline > now + MAX_FUNDING_WINDOW_MS) {
+      throw new HttpError(400, 'invalid_deadline', 'fundingDeadline must be 1 hour to 90 days in the future');
+    }
+    return new Date(deadline).toISOString();
+  }
+
+  /** Lazily expire a still-unfunded contract whose funding deadline has passed; refunds partial funding. */
+  private expireIfDue(c: InternalContract, now = this.now()): InternalContract {
+    if (c.status === 'Created' && now.getTime() >= Date.parse(c.fundingDeadline)) {
+      c.status = 'Expired';
+      c.expiredAt = now.toISOString();
+      const held = c.fundedAmount - c.releasedAmount;
+      c.refundableAmount = held > 0n ? held : 0n;
+      c.fundedAmount = c.releasedAmount;
+      c.updatedAt = now.toISOString();
+    }
+    return c;
+  }
+
   list(filter: { status?: string; party?: string; linked?: boolean } = {}): EscrowContract[] {
     return [...this.contracts.values()]
+      .map((c) => this.expireIfDue(c))
       .filter(
         (c) =>
           (!filter.status || c.status === filter.status) &&
@@ -230,7 +299,7 @@ export class EscrowStore {
   private getInternal(id: number): InternalContract {
     const c = this.contracts.get(id);
     if (!c) throw new HttpError(404, 'contract_not_found', `Contract ${id} not found`);
-    return c;
+    return this.expireIfDue(c);
   }
 
   get(id: number): EscrowContract {
@@ -243,6 +312,7 @@ export class EscrowStore {
     freelancer?: unknown;
     token?: unknown;
     milestones?: unknown;
+    fundingDeadline?: unknown;
   }): EscrowContract {
     const { client, freelancer } = input;
     if (typeof client !== 'string' || typeof freelancer !== 'string' || !client || !freelancer) {
@@ -254,7 +324,9 @@ export class EscrowStore {
     const milestones = parseMilestones(input.milestones);
     const totalAmount = sumMilestones(milestones);
 
-    const now = new Date().toISOString();
+    const nowDate = this.now();
+    const fundingDeadline = this.validateCreationDeadline(input.fundingDeadline, nowDate.getTime());
+    const now = nowDate.toISOString();
     const c: InternalContract = {
       id: this.nextId++,
       title: typeof input.title === 'string' && input.title ? input.title : 'Untitled engagement',
@@ -271,6 +343,7 @@ export class EscrowStore {
       revisions: [],
       createdAt: now,
       updatedAt: now,
+      fundingDeadline,
     };
     this.contracts.set(c.id, c);
     return toPublic(c);
@@ -340,6 +413,9 @@ export class EscrowStore {
   }
 
   private requireActive(c: InternalContract) {
+    if (c.status === 'Expired') {
+      throw new HttpError(409, 'contract_expired', 'Contract funding deadline has passed');
+    }
     if (!ACTIVE.includes(c.status)) {
       throw new HttpError(409, 'invalid_status', `Contract is ${c.status}`);
     }
@@ -357,7 +433,7 @@ export class EscrowStore {
   }
 
   private touch(c: InternalContract): EscrowContract {
-    c.updatedAt = new Date().toISOString();
+    c.updatedAt = this.nowIso();
     return toPublic(c);
   }
 
@@ -534,6 +610,36 @@ export class EscrowStore {
     }
     this.touch(c);
     return review;
+  }
+
+  /** Client-only: move the funding deadline later (at most 90 days from now). */
+  extendDeadline(id: number, client: unknown, fundingDeadline: unknown): EscrowContract {
+    const c = this.getInternal(id);
+    if (c.status === 'Expired') {
+      throw new HttpError(409, 'contract_expired', 'Contract funding deadline has passed');
+    }
+    if (client !== c.client) {
+      throw new HttpError(403, 'unauthorized', 'Only the client can extend the funding deadline');
+    }
+    const deadline = parseIsoMillis(fundingDeadline);
+    const now = this.now().getTime();
+    if (deadline === undefined || deadline <= Date.parse(c.fundingDeadline) || deadline > now + MAX_FUNDING_WINDOW_MS) {
+      throw new HttpError(400, 'invalid_deadline', 'fundingDeadline must be later and no more than 90 days away');
+    }
+    c.fundingDeadline = new Date(deadline).toISOString();
+    return this.touch(c);
+  }
+
+  /** Expire every due unfunded contract; returns the ids expired by this sweep (idempotent). */
+  sweepExpired(): number[] {
+    const now = this.now();
+    const expired: number[] = [];
+    for (const c of this.contracts.values()) {
+      const wasExpired = c.status === 'Expired';
+      this.expireIfDue(c, now);
+      if (!wasExpired && c.status === 'Expired') expired.push(c.id);
+    }
+    return expired;
   }
 
   /** @security when `caller` is given it must equal contract.client — mirrors issue_reputation's client.require_auth() */
@@ -729,7 +835,7 @@ export class EscrowStore {
   }
 
   stats() {
-    const all = [...this.contracts.values()];
+    const all = [...this.contracts.values()].map((c) => this.expireIfDue(c));
     const byStatus: Record<string, number> = {};
     for (const c of all) byStatus[c.status] = (byStatus[c.status] ?? 0) + 1;
 

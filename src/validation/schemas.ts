@@ -7,6 +7,7 @@ export const ContractStatusEnum = z.enum([
   'Disputed',
   'Resolved',
   'Cancelled',
+  'Expired',
 ]);
 
 export type ContractStatus = z.infer<typeof ContractStatusEnum>;
@@ -51,6 +52,8 @@ export const CreateContractBody = z
     freelancer: z.string().min(1),
     token: z.string().max(64).optional(),
     milestones: z.array(MilestoneItem).min(1).max(20),
+    // Validated (range-checked against the store clock) by EscrowStore.create.
+    fundingDeadline: z.string().optional(),
   })
   .strict()
   .refine((data) => data.client !== data.freelancer, {

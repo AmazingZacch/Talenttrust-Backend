@@ -160,8 +160,56 @@ const spec = {
     { name: 'Reputation' },
     { name: 'Transaction' },
     { name: 'Receipts' },
+    { name: 'Cron' },
   ],
   paths: {
+    '/api/cron/expire-contracts': {
+      get: {
+        tags: ['Cron'],
+        summary: 'Expire due unfunded contracts',
+        description:
+          'Daily sweep (Vercel cron) that moves still-unfunded `Created` contracts past their funding deadline ' +
+          'to `Expired`, refunding any partial funding. Also accepts POST. Requires `Authorization: Bearer ' +
+          '<CRON_SECRET>`; returns 404 when `CRON_SECRET` is not configured.',
+        parameters: [{ name: 'Authorization', in: 'header', required: true, schema: { type: 'string' } }],
+        responses: {
+          ...ok('Sweep result', {
+            type: 'object',
+            required: ['expired', 'checkedAt'],
+            properties: {
+              expired: { type: 'array', items: { type: 'integer' } },
+              checkedAt: { type: 'string', format: 'date-time' },
+            },
+          }),
+          401: errorResponse('Invalid or missing bearer secret (cron_unauthorized)'),
+          404: errorResponse('Cron secret is not configured'),
+        },
+      },
+    },
+    '/api/v1/contracts/{id}/extend-deadline': {
+      post: {
+        tags: ['Contracts'],
+        summary: 'Extend a contract funding deadline (client only)',
+        parameters: [idParam],
+        requestBody: {
+          required: true,
+          content: json({
+            type: 'object',
+            required: ['client', 'fundingDeadline'],
+            properties: {
+              client: { type: 'string' },
+              fundingDeadline: { type: 'string', format: 'date-time', description: 'Later than the current deadline, at most 90 days from now' },
+            },
+          }),
+        },
+        responses: {
+          ...ok('Deadline extended', contractRef),
+          400: errorResponse('Invalid deadline (invalid_deadline)'),
+          403: errorResponse('Caller is not the client'),
+          409: errorResponse('Contract has expired (contract_expired)'),
+        },
+      },
+    },
     '/api/v1/auth/challenge': {
       get: {
         tags: ['Auth'],
@@ -253,7 +301,7 @@ const spec = {
           'Use `?fields=` to request a sparse response — only the listed fields are included, ' +
           'reducing payload size for list views.',
         parameters: [
-          { name: 'status', in: 'query', schema: { type: 'string', enum: ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled'] } },
+          { name: 'status', in: 'query', schema: { type: 'string', enum: ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled', 'Expired'] } },
           { name: 'party', in: 'query', schema: { type: 'string', maxLength: 64 }, description: 'Client or freelancer address' },
           fieldsParam,
           { name: 'linked', in: 'query', schema: { type: 'boolean' }, description: 'Filter by whether contract is linked to on-chain escrow' },
@@ -277,6 +325,11 @@ const spec = {
               client: { type: 'string' },
               freelancer: { type: 'string' },
               token: { type: 'string', default: 'XLM' },
+              fundingDeadline: {
+                type: 'string',
+                format: 'date-time',
+                description: 'ISO-8601 deadline, from 1 hour through 90 days after creation (default 14 days)',
+              },
               milestones: milestonesSchema,
             },
           }),
@@ -789,8 +842,12 @@ const spec = {
             type: 'string',
             description: 'Canonical decimal string released amount in token base units.',
           },
-          status: { type: 'string', enum: ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled'] },
+          status: { type: 'string', enum: ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled', 'Expired'] },
           reputationIssued: { type: 'boolean' },
+          fundingDeadline: { type: 'string', format: 'date-time' },
+          expiredAt: { type: 'string', format: 'date-time' },
+          refundableAmount: { type: 'number', description: 'DEPRECATED — lossy above 2^53. Use refundableAmountUnits.' },
+          refundableAmountUnits: { type: 'string', description: 'Partial funding returned to the client on expiry (base units).' },
           dispute: {
             type: 'object',
             nullable: true,
@@ -989,6 +1046,7 @@ const spec = {
           client: { type: 'string', minLength: 1 },
           freelancer: { type: 'string', minLength: 1 },
           token: { type: 'string', maxLength: 64 },
+          fundingDeadline: { type: 'string', format: 'date-time' },
           milestones: {
             type: 'array',
             minItems: 1,
@@ -1073,6 +1131,7 @@ const PROTECTED: Array<[string, string]> = [
   ['/api/v1/contracts/{id}', 'patch'],
   ['/api/v1/contracts/{id}', 'delete'],
   ['/api/v1/contracts/{id}/deposit', 'post'],
+  ['/api/v1/contracts/{id}/extend-deadline', 'post'],
   ['/api/v1/contracts/{id}/milestones/{index}/release', 'post'],
   ['/api/v1/contracts/{id}/dispute', 'post'],
   ['/api/v1/contracts/{id}/cancel', 'post'],
