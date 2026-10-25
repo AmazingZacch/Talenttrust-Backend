@@ -18,6 +18,7 @@ import {
 } from './store';
 import { openapi, docsHtml, docsCsp } from './openapi';
 import { allowlist, corsOptionsFor, originGuard } from './cors';
+import { methodNotAllowed, optionsHandler } from './methods';
 import { PauseGuard } from './pauseGuard';
 import { TxRelay } from './tx';
 import { isWebhookAdminTokenValid, WebhookManager } from './webhooks';
@@ -580,6 +581,8 @@ export function createApp(
   // Unknown cross-origin callers get 403 before any handler; allowlisted ones get CORS headers.
   app.use(originGuard(corsOrigins));
   app.use(cors(corsOptionsFor(corsOrigins)));
+  // OPTIONS on a known path: 204 with `Allow` (cors() above still adds the preflight headers).
+  app.use(optionsHandler(app));
 
   // Compression middleware: gzip/br for JSON responses ≥ 1 KB.
   // Excluded for text/event-stream and when Cache-Control: no-transform is set.
@@ -1398,6 +1401,9 @@ export function createApp(
     nodejsHeapUsed.set({}, process.memoryUsage().heapUsed);
     res.type('text/plain; version=0.0.4').send(registry.exposition());
   });
+
+  // Known path, unsupported method: 405 with the supported methods.
+  app.use(methodNotAllowed(app));
 
   app.use((req, _res, next) => {
     next(new HttpError('not_found', `No route for ${req.method} ${req.path}`, { docs: '/docs' }));

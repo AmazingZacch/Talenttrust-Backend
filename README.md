@@ -205,6 +205,15 @@ accepted for backwards compatibility but rejected (`403 forbidden`) if it differ
   hashes and `crossorigin="anonymous"`; the page's inline style/script are allowed by exact `sha256`
   hashes derived from the served markup.
 
+## Method handling
+
+- An unsupported method on a known path returns `405 method_not_allowed` with an `Allow` header and
+  `allowed: [...]` in the body. The supported methods are read from the routes registered on the app,
+  so they always match the handlers.
+- `OPTIONS` on a known path returns `204` with `Allow` (CORS preflight responses keep their CORS headers).
+- `HEAD` is supported for every `GET` route.
+- Unknown paths still return `404 not_found`.
+
 ## Development
 
 ```bash

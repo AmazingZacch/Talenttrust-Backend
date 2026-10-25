@@ -1104,6 +1104,16 @@ const spec = {
       },
     },
     responses: {
+      MethodNotAllowed: {
+        description: 'The path exists but does not support this HTTP method (`method_not_allowed`).',
+        headers: {
+          Allow: {
+            description: 'Comma-separated list of supported methods, including HEAD for GET routes.',
+            schema: { type: 'string' },
+          },
+        },
+        content: json({ $ref: '#/components/schemas/MethodNotAllowedError' }),
+      },
       NotFound: {
         description: 'No route matches the method and path (`not_found`, with `docs`)',
         content: json({ $ref: '#/components/schemas/Error' }),
@@ -1125,6 +1135,15 @@ const spec = {
       },
     },
     schemas: {
+      MethodNotAllowedError: {
+        type: 'object',
+        required: ['error', 'message', 'allowed'],
+        properties: {
+          error: { type: 'string', enum: ['method_not_allowed'] },
+          message: { type: 'string' },
+          allowed: { type: 'array', items: { type: 'string' } },
+        },
+      },
       WebhookSubscription: { type: 'object', required: ['id', 'url', 'events', 'active', 'createdAt', 'updatedAt'], properties: { id: { type: 'string' }, url: { type: 'string', format: 'uri' }, events: { type: 'array', items: { type: 'string' } }, active: { type: 'boolean' }, createdAt: { type: 'string', format: 'date-time' }, updatedAt: { type: 'string', format: 'date-time' } } },
       WebhookDelivery: { type: 'object', properties: { id: { type: 'string' }, subscriptionId: { type: 'string' }, eventId: { type: 'string' }, eventType: { type: 'string' }, status: { type: 'string' }, attempts: { type: 'integer' }, statusCode: { type: 'integer' }, lastError: { type: 'string' }, createdAt: { type: 'string', format: 'date-time' }, updatedAt: { type: 'string', format: 'date-time' } } },
       ChainEscrow: {
@@ -2107,7 +2126,18 @@ function withBodyErrors<T extends { paths: object }>(doc: T): T {
   return doc;
 }
 
-export const openapi = withProblems(withBodyErrors(withPauseGuard(withEtags(withBearerAuth(withIdempotency(withReceipts(spec)))))));
+/** Every operation can answer 405 (known path, unsupported method) with an `Allow` header. */
+function withMethodNotAllowed<T extends { paths: object }>(doc: T): T {
+  const paths = doc.paths as Record<string, Record<string, Operation>>;
+  for (const item of Object.values(paths)) {
+    for (const op of Object.values(item)) {
+      op.responses = { ...op.responses, 405: { $ref: '#/components/responses/MethodNotAllowed' } };
+    }
+  }
+  return doc;
+}
+
+export const openapi = withMethodNotAllowed(withProblems(withBodyErrors(withPauseGuard(withEtags(withBearerAuth(withIdempotency(withReceipts(spec))))))));
 
 const SWAGGER_VERSION = '5.17.14';
 const SWAGGER_CSS = `https://unpkg.com/swagger-ui-dist@${SWAGGER_VERSION}/swagger-ui.css`;

@@ -73,5 +73,7 @@ export const corsOptionsFor = (origins: string[]): CorsOptions => {
     maxAge: 600,
     credentials: false,
     optionsSuccessStatus: 204,
+    // Let optionsHandler answer preflights so they also carry `Allow`.
+    preflightContinue: true,
   };
 };
