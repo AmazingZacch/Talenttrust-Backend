@@ -90,8 +90,16 @@ export const CancelBody = z.object({}).strict();
 
 export const ListQuery = z
   .object({
-    status: ContractStatusEnum.optional(),
+    // Comma-separated statuses; each value is checked by the route (invalid_query).
+    status: z.string().optional(),
     party: z.string().max(64).optional(),
+    role: z.string().optional(),
+    token: z.string().optional(),
+    createdAfter: z.string().optional(),
+    createdBefore: z.string().optional(),
+    limit: z.string().optional(),
+    cursor: z.string().optional(),
+    sort: z.string().optional(),
     linked: z.enum(['true', 'false']).optional(),
     fields: z.string().optional(),
   })

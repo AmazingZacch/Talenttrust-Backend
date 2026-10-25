@@ -311,20 +311,43 @@ const spec = {
     '/api/v1/contracts': {
       get: {
         tags: ['Contracts'],
-        summary: 'List escrow contracts',
+        summary: 'List escrow contracts with cursor pagination, sorting and filters',
         description:
-          'Returns an array of contracts. Supports filtering by `status` or `party` address. ' +
+          'Returns a page of contracts (`data`) plus `page: { limit, nextCursor, hasMore }`. Pass ' +
+          '`page.nextCursor` back as `cursor` (with the same `sort`) for the next page; ties are broken by id. ' +
           'Use `?fields=` to request a sparse response — only the listed fields are included, ' +
           'reducing payload size for list views.',
         parameters: [
-          { name: 'status', in: 'query', schema: { type: 'string', enum: ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled', 'Expired'] } },
+          { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 }, description: 'Page size' },
+          { name: 'cursor', in: 'query', schema: { type: 'string' }, description: 'Opaque cursor returned in `page.nextCursor`' },
+          { name: 'sort', in: 'query', schema: { type: 'string', enum: ['createdAt', '-createdAt', 'updatedAt', '-updatedAt', 'totalAmount', '-totalAmount'], default: '-createdAt' }, description: 'Sort field and direction' },
+          { name: 'status', in: 'query', schema: { type: 'string' }, description: 'Comma-separated list of statuses (Created, Funded, Completed, Disputed, Resolved, Cancelled, Expired)' },
           { name: 'party', in: 'query', schema: { type: 'string', maxLength: 64 }, description: 'Client or freelancer address' },
+          { name: 'role', in: 'query', schema: { type: 'string', enum: ['client', 'freelancer'] }, description: 'Restricts `party` to the given role; requires `party`' },
+          { name: 'token', in: 'query', schema: { type: 'string' }, description: 'Exact token match' },
+          { name: 'createdAfter', in: 'query', schema: { type: 'string', format: 'date-time' }, description: 'ISO-8601 lower bound on createdAt' },
+          { name: 'createdBefore', in: 'query', schema: { type: 'string', format: 'date-time' }, description: 'ISO-8601 upper bound on createdAt' },
           fieldsParam,
           { name: 'linked', in: 'query', schema: { type: 'boolean' }, description: 'Filter by whether contract is linked to on-chain escrow' },
         ],
         responses: {
-          ...ok('Contracts', { type: 'object', properties: { data: { type: 'array', items: contractRef } } }),
-          ...fieldsError,
+          ...ok('Paginated contracts', {
+            type: 'object',
+            required: ['data', 'page'],
+            properties: {
+              data: { type: 'array', items: contractRef },
+              page: {
+                type: 'object',
+                required: ['limit', 'hasMore'],
+                properties: {
+                  limit: { type: 'integer' },
+                  nextCursor: { type: 'string', nullable: true },
+                  hasMore: { type: 'boolean' },
+                },
+              },
+            },
+          }),
+          400: errorResponse('invalid_query, invalid_cursor or invalid `?fields=` value'),
         },
       },
       post: {

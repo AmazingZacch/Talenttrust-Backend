@@ -24,6 +24,31 @@ export type ContractStatus =
   | 'Cancelled'
   | 'Expired';
 
+export type SortSpec =
+  | 'createdAt'
+  | '-createdAt'
+  | 'updatedAt'
+  | '-updatedAt'
+  | 'totalAmount'
+  | '-totalAmount';
+
+/** Keyset cursor: the sort it was issued for plus the last row's sort value and id. */
+export interface Cursor {
+  sort: string;
+  lastValue: string;
+  lastId: number;
+}
+
+export interface QueryFilters {
+  status?: string[];
+  party?: string;
+  role?: 'client' | 'freelancer';
+  token?: string;
+  createdAfter?: string;
+  createdBefore?: string;
+  linked?: boolean;
+}
+
 export interface Milestone {
   index: number;
   title: string;
@@ -331,6 +356,32 @@ export class EscrowStore {
           (filter.linked === undefined || (filter.linked ? !!c.chain : !c.chain)),
       )
       .map(toPublic);
+  }
+
+  /** Filtered, sorted, keyset-paginated listing (ties broken by id). */
+  query(opts: { filters?: QueryFilters; sort?: string; limit?: number; after?: Cursor }): {
+    data: EscrowContract[];
+    hasMore: boolean;
+    nextCursor: Cursor | null;
+  } {
+    const limit = opts.limit ?? 20;
+    const sort = opts.sort ?? '-createdAt';
+    const { field, desc } = parseSort(sort);
+    let items = [...this.contracts.values()]
+      .map((c) => this.expireIfDue(c))
+      .filter((c) => matchesFilters(c, opts.filters));
+    items.sort((a, b) => compareContracts(a, b, field, desc));
+    const after = opts.after;
+    if (after) items = items.filter((c) => isAfterCursor(c, after, field, desc));
+    const page = items.slice(0, limit + 1);
+    const hasMore = page.length > limit;
+    const data = hasMore ? page.slice(0, limit) : page;
+    let nextCursor: Cursor | null = null;
+    if (hasMore) {
+      const last = data[data.length - 1];
+      nextCursor = { sort, lastValue: String(sortValue(last, field)), lastId: last.id };
+    }
+    return { data: data.map(toPublic), hasMore, nextCursor };
   }
 
   private getInternal(id: number): InternalContract {
@@ -939,4 +990,70 @@ export class EscrowStore {
     this.rate(b.id, 5);
     return this;
   }
+}
+
+export const LIST_STATUSES: ContractStatus[] = ['Created', 'Funded', 'Completed', 'Disputed', 'Resolved', 'Cancelled', 'Expired'];
+const SORT_FIELDS = ['createdAt', 'updatedAt', 'totalAmount'] as const;
+type SortField = (typeof SORT_FIELDS)[number];
+
+function parseSort(sort: string): { field: SortField; desc: boolean } {
+  const desc = sort.startsWith('-');
+  const field = desc ? sort.slice(1) : sort;
+  if (!(SORT_FIELDS as readonly string[]).includes(field)) {
+    throw new HttpError(400, 'invalid_query', 'invalid sort');
+  }
+  return { field: field as SortField, desc };
+}
+
+function sortValue(c: InternalContract, field: SortField): string | bigint {
+  return field === 'totalAmount' ? c.totalAmount : c[field];
+}
+
+/** Compare two sort values; totalAmount compares as bigint (cursor values arrive as strings). */
+function compareValue(va: string | bigint, vb: string | bigint, field: SortField): number {
+  if (field === 'totalAmount') {
+    let a: bigint;
+    let b: bigint;
+    try {
+      a = BigInt(va);
+      b = BigInt(vb);
+    } catch {
+      throw new HttpError(400, 'invalid_cursor', 'invalid cursor');
+    }
+    return a < b ? -1 : a > b ? 1 : 0;
+  }
+  const a = String(va);
+  const b = String(vb);
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function compareContracts(a: InternalContract, b: InternalContract, field: SortField, desc: boolean): number {
+  const cmp = compareValue(sortValue(a, field), sortValue(b, field), field);
+  if (cmp !== 0) return desc ? -cmp : cmp;
+  return a.id - b.id;
+}
+
+function matchesFilters(c: InternalContract, f: QueryFilters | undefined): boolean {
+  if (!f) return true;
+  if (f.status && !f.status.includes(c.status)) return false;
+  if (f.party !== undefined) {
+    if (f.role === 'client') {
+      if (c.client !== f.party) return false;
+    } else if (f.role === 'freelancer') {
+      if (c.freelancer !== f.party) return false;
+    } else if (c.client !== f.party && c.freelancer !== f.party) {
+      return false;
+    }
+  }
+  if (f.token && c.token !== f.token) return false;
+  if (f.createdAfter && c.createdAt < f.createdAfter) return false;
+  if (f.createdBefore && c.createdAt > f.createdBefore) return false;
+  if (f.linked !== undefined && !!c.chain !== f.linked) return false;
+  return true;
+}
+
+function isAfterCursor(c: InternalContract, after: Cursor, field: SortField, desc: boolean): boolean {
+  const cmp = compareValue(sortValue(c, field), after.lastValue, field);
+  if (cmp !== 0) return desc ? cmp < 0 : cmp > 0;
+  return c.id > after.lastId;
 }

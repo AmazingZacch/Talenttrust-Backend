@@ -3,7 +3,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
 import { config, explorerUrl } from './config';
-import { EscrowStore, HttpError } from './store';
+import { EscrowStore, HttpError, LIST_STATUSES, type Cursor, type QueryFilters } from './store';
 import { openapi, docsHtml } from './openapi';
 import { validate } from './validation/middleware';
 import {
@@ -25,7 +25,7 @@ import { ChainReader, SorobanRpcChainReader } from './chain';
 import { buildEscrowTransaction, TxBuildError, type RpcClient } from './stellar/escrowTxBuilder';
 import { bigIntReplacer } from './amount';
 import { createRegistry, type Registry, HTTP_DURATION_BUCKETS, constantTimeEqual } from './metrics';
-import { createHash, timingSafeEqual } from 'crypto';
+import { createHash, createHmac, timingSafeEqual } from 'crypto';
 import { StrKey, Keypair } from '@stellar/stellar-sdk';
 import { randomBytes } from 'crypto';
 import { buildChallenge, verifyChallenge, consumeNonce } from './auth/challenge';
@@ -94,6 +94,80 @@ const requireCronSecret = (req: Request) => {
 };
 
 const REQUEST_ID_RE = /^[A-Za-z0-9._-]{8,128}$/;
+
+// --- Contract list pagination (cursor = base64url JSON + HMAC, so clients cannot forge it) ---
+
+const CURSOR_SECRET = process.env.CURSOR_SECRET || randomBytes(32).toString('base64url');
+
+function safeEqual(a: string, b: string): boolean {
+  const ba = Buffer.from(a, 'utf8');
+  const bb = Buffer.from(b, 'utf8');
+  return ba.length === bb.length && timingSafeEqual(ba, bb);
+}
+
+function parseLimit(v: unknown): number {
+  if (v === undefined) return 20;
+  const n = Number(v);
+  if (typeof v !== 'string' || !Number.isInteger(n) || n < 1 || n > 100) {
+    throw new HttpError(400, 'invalid_query', 'limit must be an integer between 1 and 100');
+  }
+  return n;
+}
+
+function parseSortParam(v: unknown): string {
+  if (v === undefined) return '-createdAt';
+  const s = String(v);
+  const field = s.startsWith('-') ? s.slice(1) : s;
+  if (!['createdAt', 'updatedAt', 'totalAmount'].includes(field)) {
+    throw new HttpError(400, 'invalid_query', 'sort must be one of createdAt, updatedAt, totalAmount (prefix - for descending)');
+  }
+  return s;
+}
+
+function serializeCursor(cursor: Cursor): string {
+  const payload = Buffer.from(JSON.stringify(cursor)).toString('base64url');
+  const sig = createHmac('sha256', CURSOR_SECRET).update(payload).digest('base64url');
+  return `${payload}.${sig}`;
+}
+
+function parseCursorParam(cursor: unknown, sort: string): Cursor | undefined {
+  if (cursor === undefined || cursor === '') return undefined;
+  const parts = String(cursor).split('.');
+  if (parts.length !== 2) throw new HttpError(400, 'invalid_cursor', 'invalid cursor');
+  const [payload, sig] = parts;
+  const expected = createHmac('sha256', CURSOR_SECRET).update(payload).digest('base64url');
+  if (!safeEqual(sig, expected)) throw new HttpError(400, 'invalid_cursor', 'invalid cursor');
+  let obj: { sort?: unknown; lastValue?: unknown; lastId?: unknown };
+  try {
+    obj = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+  } catch {
+    throw new HttpError(400, 'invalid_cursor', 'invalid cursor');
+  }
+  if (obj.sort !== sort) throw new HttpError(400, 'invalid_cursor', 'cursor sort does not match requested sort');
+  return { sort, lastValue: String(obj.lastValue ?? ''), lastId: Number(obj.lastId ?? 0) };
+}
+
+function parseFilters(q: Request['query']): QueryFilters {
+  const f: QueryFilters = {};
+  if (typeof q.status === 'string') {
+    f.status = q.status.split(',').map((s) => s.trim()).filter(Boolean);
+    for (const status of f.status) {
+      if (!(LIST_STATUSES as string[]).includes(status)) throw new HttpError(400, 'invalid_query', `invalid status ${status}`);
+    }
+  }
+  if (typeof q.party === 'string') f.party = q.party;
+  if (typeof q.role === 'string') {
+    if (f.party === undefined) throw new HttpError(400, 'invalid_query', 'role requires party');
+    if (q.role !== 'client' && q.role !== 'freelancer') throw new HttpError(400, 'invalid_query', 'role must be client or freelancer');
+    f.role = q.role;
+  }
+  if (typeof q.token === 'string') f.token = q.token;
+  if (typeof q.createdAfter === 'string') f.createdAfter = q.createdAfter;
+  if (typeof q.createdBefore === 'string') f.createdBefore = q.createdBefore;
+  if (q.linked === 'true') f.linked = true;
+  else if (q.linked === 'false') f.linked = false;
+  return f;
+}
 
 /** Validate that a string is a valid Stellar ed25519 public key (G…). */
 function isValidStellarAddress(addr: unknown): addr is string {
@@ -420,16 +494,16 @@ export function createApp(
     '/contracts',
     validate({ query: ListQuery }),
     wrap((req) => {
-      let linked: boolean | undefined = undefined;
-      if (req.query.linked === 'true') linked = true;
-      else if (req.query.linked === 'false') linked = false;
+      const limit = parseLimit(req.query.limit);
+      const sort = parseSortParam(req.query.sort);
+      const after = parseCursorParam(req.query.cursor, sort);
+      const filters = parseFilters(req.query);
       const spec = parseFields(req);
-      const contracts = store.list({
-        status: req.query.status as string | undefined,
-        party: req.query.party as string | undefined,
-        linked,
-      });
-      return { data: contracts.map((c) => project(c, spec)) };
+      const result = store.query({ filters, sort, limit, after });
+      return {
+        data: result.data.map((c) => project(c, spec)),
+        page: { limit, nextCursor: result.nextCursor ? serializeCursor(result.nextCursor) : null, hasMore: result.hasMore },
+      };
     }),
   );
   v1.post(
